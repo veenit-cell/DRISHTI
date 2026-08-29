@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ev2-backend"
+version = "0.1.0"
+description = "Phase 1 API foundation for EV2 district disaster decision support"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi==0.116.1",
+  "psycopg[binary]==3.2.9",
+  "pydantic-settings==2.10.1",
+  "uvicorn==0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx==0.28.1",
+  "jsonschema==4.25.0",
+  "pytest==8.4.1",
+  "ruff==0.12.7",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

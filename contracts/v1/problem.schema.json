@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ev2.local/contracts/v1/problem.schema.json",
+  "title": "EV2 Problem Response v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "title",
+    "status",
+    "code",
+    "detail",
+    "correlation_id",
+    "retryable",
+    "violations"
+  ],
+  "properties": {
+    "type": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "status": { "type": "integer", "minimum": 400, "maximum": 599 },
+    "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+    "detail": { "type": "string" },
+    "correlation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "retryable": { "type": "boolean" },
+    "violations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "message"],
+        "properties": {
+          "field": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}

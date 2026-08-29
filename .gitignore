@@ -4,7 +4,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
@@ -102,7 +101,13 @@ dist/
 build/
 *.local
 .env*.local
+.tools/
 
-# Documentation (except overview)
-docs/
-!docs/PROJECT_OVERVIEW.md
+# Documentation is source material; only implementation handoffs are committed here.
+docs/*
+!docs/handoffs/
+docs/handoffs/*
+!docs/handoffs/phase-1/
+docs/handoffs/phase-1/*
+!docs/handoffs/phase-1/manifest.md
+!docs/handoffs/phase-1/bug-log.md

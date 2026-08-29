@@ -1,0 +1,21 @@
+name: ev2-phase-1
+
+services:
+  database:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_DB: ev2
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ev2"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - ev2-postgres:/var/lib/postgresql/data
+
+volumes:
+  ev2-postgres:

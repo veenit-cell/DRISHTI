@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ev2.local/contracts/v1/event-envelope.schema.json",
+  "title": "EV2 Event Envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_contract_version",
+    "event_id",
+    "event_type",
+    "occurred_at",
+    "recorded_at",
+    "tenant_id",
+    "workspace_id",
+    "aggregate",
+    "actor",
+    "correlation_id",
+    "causation_id",
+    "payload"
+  ],
+  "properties": {
+    "event_contract_version": { "const": 1 },
+    "event_id": { "$ref": "#/$defs/opaqueId" },
+    "event_type": { "type": "string", "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$" },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "tenant_id": { "$ref": "#/$defs/opaqueId" },
+    "workspace_id": { "$ref": "#/$defs/opaqueId" },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "revision"],
+      "properties": {
+        "type": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "id": { "$ref": "#/$defs/opaqueId" },
+        "revision": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "enum": ["user", "system", "adapter"] },
+        "id": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "correlation_id": { "$ref": "#/$defs/opaqueId" },
+    "causation_id": {
+      "oneOf": [{ "$ref": "#/$defs/opaqueId" }, { "type": "null" }]
+    },
+    "payload": { "type": "object" }
+  },
+  "$defs": {
+    "opaqueId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"
+    }
+  }
+}

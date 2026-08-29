@@ -1,0 +1,152 @@
+:root {
+  color: #eaf4ef;
+  background: #07130f;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 80% 10%, rgba(45, 159, 111, 0.16), transparent 30rem),
+    linear-gradient(150deg, #07130f 0%, #0c2119 100%);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.shell {
+  width: min(1120px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: clamp(4rem, 10vw, 8rem) 0;
+}
+
+.hero {
+  max-width: 800px;
+}
+
+.eyebrow {
+  margin: 0 0 1rem;
+  color: #78d8ad;
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2.6rem, 7vw, 5.8rem);
+  font-weight: 650;
+  letter-spacing: -0.055em;
+  line-height: 0.98;
+}
+
+.summary {
+  max-width: 690px;
+  margin: 1.8rem 0 0;
+  color: #adc3b9;
+  font-size: clamp(1rem, 2vw, 1.2rem);
+  line-height: 1.7;
+}
+
+.status-card {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.4fr) 1fr;
+  gap: 1.5rem;
+  align-items: center;
+  margin-top: 3.5rem;
+  padding: 1.2rem 1.4rem;
+  border: 1px solid rgba(159, 214, 188, 0.2);
+  border-radius: 1rem;
+  background: rgba(13, 35, 27, 0.76);
+  box-shadow: 0 18px 70px rgba(0, 0, 0, 0.28);
+}
+
+.status-card p {
+  margin: 0;
+  color: #d7e8df;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 0.7rem;
+  height: 0.7rem;
+  margin-right: 0.65rem;
+  border-radius: 50%;
+  background: #efb75c;
+  box-shadow: 0 0 0 4px rgba(239, 183, 92, 0.12);
+}
+
+.status-dot--ready {
+  background: #66dfa5;
+  box-shadow: 0 0 0 4px rgba(102, 223, 165, 0.12);
+}
+
+.status-dot--error {
+  background: #ff7c6c;
+  box-shadow: 0 0 0 4px rgba(255, 124, 108, 0.12);
+}
+
+.status-label {
+  color: #93aa9f;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.principles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.principles article {
+  min-height: 210px;
+  padding: 1.4rem;
+  border: 1px solid rgba(159, 214, 188, 0.14);
+  border-radius: 1rem;
+  background: rgba(8, 24, 18, 0.62);
+}
+
+.principles span {
+  color: #5e9279;
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.principles h2 {
+  margin: 2.6rem 0 0.65rem;
+  font-size: 1.12rem;
+}
+
+.principles p {
+  margin: 0;
+  color: #98afa4;
+  line-height: 1.55;
+}
+
+@media (max-width: 720px) {
+  .status-card,
+  .principles {
+    grid-template-columns: 1fr;
+  }
+
+  .principles article {
+    min-height: auto;
+  }
+
+  .principles h2 {
+    margin-top: 1.5rem;
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "event_contract_version": 1,
+  "event_id": "evt_occurrence_001",
+  "event_type": "workspace.created",
+  "occurred_at": "2026-08-30T10:00:00+05:30",
+  "recorded_at": "2026-08-30T10:00:01+05:30",
+  "tenant_id": "org_demo",
+  "workspace_id": "evt_demo",
+  "aggregate": {
+    "type": "event_workspace",
+    "id": "evt_demo",
+    "revision": 1
+  },
+  "actor": {
+    "type": "user",
+    "id": "usr_demo_operator"
+  },
+  "correlation_id": "corr_demo_001",
+  "causation_id": null,
+  "payload": {
+    "mode": "replay"
+  }
+}

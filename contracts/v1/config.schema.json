@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ev2.local/contracts/v1/config.schema.json",
+  "title": "EV2 Non-Secret Runtime Configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "app_environment",
+    "database_url",
+    "dev_identity_enabled",
+    "allowed_origins",
+    "max_correlation_id_length"
+  ],
+  "properties": {
+    "app_environment": { "enum": ["development", "test", "production"] },
+    "database_url": { "type": "string", "pattern": "^postgresql://" },
+    "dev_identity_enabled": { "type": "boolean" },
+    "allowed_origins": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "max_correlation_id_length": {
+      "type": "integer",
+      "minimum": 32,
+      "maximum": 256
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "app_environment": { "const": "production" } },
+        "required": ["app_environment"]
+      },
+      "then": {
+        "properties": { "dev_identity_enabled": { "const": false } }
+      }
+    }
+  ]
+}
