@@ -4,8 +4,8 @@ The production identity provider and partner-approved role mapping are unresolve
 
 | Fixture | Role | Tenant | Workspace | Scopes |
 |---|---|---|---|---|
-| `operator` | operator | `org_demo` | `evt_demo` | `context:read`, `system:read`, `evidence:read`, `evidence:write`, `map:read` |
-| `viewer` | viewer | `org_demo` | `evt_demo` | `system:read`, `evidence:read`, `map:read` |
+| `operator` | operator | `org_demo` | `evt_demo` | `context:read`, `system:read`, `evidence:read`, `evidence:write`, `map:read`, `operations:read`, `operations:write` |
+| `viewer` | viewer | `org_demo` | `evt_demo` | `system:read`, `evidence:read`, `map:read`, `operations:read` |
 
 Rules:
 

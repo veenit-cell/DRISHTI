@@ -6,6 +6,15 @@ from fastapi.responses import JSONResponse
 from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
 from app.evidence import ReportConflictError, ReportCreate, ReportNotFoundError
+from app.operations import (
+    QueueItemCreate,
+    QueueItemNotFoundError,
+    ResourceNotFoundError,
+    TaskApproval,
+    TaskConflictError,
+    TaskNotFoundError,
+    TaskStatusUpdate,
+)
 from app.persistence import database_ready
 
 router = APIRouter()
@@ -177,3 +186,97 @@ async def map_features(
             detail="bbox must be min_longitude,min_latitude,max_longitude,max_latitude in WGS84.",
         ) from None
     return request.app.state.evidence_store.map_features(context, limit, parsed_bbox)
+
+
+@router.post("/operations/demo/seed", tags=["operations"], response_model=None)
+async def seed_operations(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    return {
+        "synthetic": True,
+        **request.app.state.operations_store.seed_demo(context, request.app.state.clock.now()),
+    }
+
+
+@router.get("/resources", tags=["operations"], response_model=None)
+async def list_resources(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
+) -> dict[str, Any]:
+    return {"items": request.app.state.operations_store.list_resources(context)}
+
+
+@router.post("/response-queue", tags=["operations"], response_model=None, status_code=201)
+async def create_response_queue(
+    request: Request,
+    item: QueueItemCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    return request.app.state.operations_store.create_queue(
+        context, item, request.app.state.clock.now()
+    )
+
+
+@router.get("/response-queue", tags=["operations"], response_model=None)
+async def list_response_queue(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
+) -> dict[str, Any]:
+    return {"items": request.app.state.operations_store.list_queue(context)}
+
+
+@router.post("/response-queue/{queue_id}/approve", tags=["operations"], response_model=None)
+async def approve_task(
+    request: Request,
+    queue_id: str,
+    approval: TaskApproval,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.operations_store.approve_task(
+            context, queue_id, approval, request.app.state.clock.now()
+        )
+    except QueueItemNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="QUEUE_ITEM_NOT_FOUND",
+            title="Queue item not found",
+            detail="The queue item is outside the current scope.",
+        ) from None
+    except ResourceNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="RESOURCE_NOT_FOUND",
+            title="Resource not found",
+            detail="The resource is outside the current scope.",
+        ) from None
+    except TaskConflictError as exc:
+        raise ApiProblem(
+            status=409, code="TASK_CONFLICT", title="Task cannot be approved", detail=str(exc)
+        ) from None
+
+
+@router.get("/tasks", tags=["operations"], response_model=None)
+async def list_tasks(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
+) -> dict[str, Any]:
+    return {"items": request.app.state.operations_store.list_tasks(context)}
+
+
+@router.patch("/tasks/{task_id}", tags=["operations"], response_model=None)
+async def update_task(
+    request: Request,
+    task_id: str,
+    update: TaskStatusUpdate,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.operations_store.update_task(
+            context, task_id, update.status, request.app.state.clock.now()
+        )
+    except TaskNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="TASK_NOT_FOUND",
+            title="Task not found",
+            detail="The task is outside the current scope.",
+        ) from None

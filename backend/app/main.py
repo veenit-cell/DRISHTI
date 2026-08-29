@@ -7,11 +7,13 @@ from app.core.config import Settings, get_settings
 from app.core.errors import install_problem_handlers
 from app.core.middleware import CorrelationIdMiddleware
 from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
+from app.operations import InMemoryOperationsStore
 
 
 def create_app(
     settings: Settings | None = None,
     evidence_store: EvidenceStore | None = None,
+    operations_store: InMemoryOperationsStore | None = None,
     clock: Clock | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
@@ -26,6 +28,7 @@ def create_app(
     app.state.evidence_store = evidence_store or PostgreSQLEvidenceStore(
         resolved_settings.database_url
     )
+    app.state.operations_store = operations_store or InMemoryOperationsStore()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[str(origin) for origin in resolved_settings.allowed_origins],
