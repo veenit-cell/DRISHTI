@@ -14,8 +14,10 @@ def database_ready(database_url: str) -> bool:
 
 
 def apply_foundation_migration(database_url: str) -> None:
-    migration = Path(__file__).parents[1] / "migrations" / "0001_foundation.sql"
-    sql = migration.read_text(encoding="utf-8")
+    migrations_dir = Path(__file__).parents[1] / "migrations"
+    sql = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(migrations_dir.glob("*.sql"))
+    )
     with psycopg.connect(database_url) as connection:
         with connection.cursor() as cursor:
             cursor.execute(sql)

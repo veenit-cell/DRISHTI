@@ -2,12 +2,18 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
+from app.core.clock import Clock, SystemClock
 from app.core.config import Settings, get_settings
 from app.core.errors import install_problem_handlers
 from app.core.middleware import CorrelationIdMiddleware
+from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    evidence_store: EvidenceStore | None = None,
+    clock: Clock | None = None,
+) -> FastAPI:
     resolved_settings = settings or get_settings()
     app = FastAPI(
         title=resolved_settings.app_name,
@@ -16,6 +22,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
     )
     app.state.settings = resolved_settings
+    app.state.clock = clock or SystemClock()
+    app.state.evidence_store = evidence_store or PostgreSQLEvidenceStore(
+        resolved_settings.database_url
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[str(origin) for origin in resolved_settings.allowed_origins],

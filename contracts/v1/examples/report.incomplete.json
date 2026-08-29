@@ -1,0 +1,11 @@
+{
+  "contract_version": 1,
+  "client_record_id": "rpt_demo_unknown_001",
+  "observed_at": null,
+  "received_at": null,
+  "source": { "channel": "operator_entry", "source_class": "unverified_reporter" },
+  "location": null,
+  "report_type": "medical_need",
+  "facts": { "people_affected": null, "access_state": null },
+  "privacy_class": "internal"
+}

@@ -22,14 +22,22 @@ _DEVELOPMENT_IDENTITIES = {
         "role": "operator",
         "tenant_id": "org_demo",
         "workspace_id": "evt_demo",
-        "scopes": frozenset({"context:read", "system:read"}),
+        "scopes": frozenset(
+            {
+                "context:read",
+                "system:read",
+                "evidence:read",
+                "evidence:write",
+                "map:read",
+            }
+        ),
     },
     "viewer": {
         "actor_id": "usr_demo_viewer",
         "role": "viewer",
         "tenant_id": "org_demo",
         "workspace_id": "evt_demo",
-        "scopes": frozenset({"system:read"}),
+        "scopes": frozenset({"system:read", "evidence:read", "map:read"}),
     },
 }
 

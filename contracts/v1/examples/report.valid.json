@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "client_record_id": "rpt_demo_001",
+  "observed_at": "2026-08-30T10:10:00+05:30",
+  "received_at": "2026-08-30T10:11:00+05:30",
+  "source": { "channel": "field_form", "source_class": "authenticated_responder" },
+  "location": {
+    "geometry": { "type": "Point", "coordinates": [91.742, 26.184] },
+    "uncertainty_m": 120,
+    "place_text": "Synthetic North Sector"
+  },
+  "report_type": "water_contamination",
+  "facts": { "people_affected": null, "access_state": "unknown" },
+  "privacy_class": "restricted_operational"
+}

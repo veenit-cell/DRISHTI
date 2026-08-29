@@ -1,10 +1,11 @@
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.core.context import RequestContext, require_scopes
-from app.core.errors import Problem, problem_response
+from app.core.errors import ApiProblem, Problem, problem_response
+from app.evidence import ReportConflictError, ReportCreate, ReportNotFoundError
 from app.persistence import database_ready
 
 router = APIRouter()
@@ -55,3 +56,124 @@ async def development_context(
         "correlation_id": context.correlation_id,
         "identity_source": "development-fixture",
     }
+
+
+@router.post("/reports", tags=["evidence"], status_code=201, response_model=None)
+async def create_report(
+    request: Request,
+    report: ReportCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+) -> dict[str, Any]:
+    """Accept one immutable report; retries reuse the client record identity."""
+    if idempotency_key != report.client_record_id:
+        raise ApiProblem(
+            status=422,
+            code="IDEMPOTENCY_KEY_MISMATCH",
+            title="Idempotency key mismatch",
+            detail="Idempotency-Key must equal client_record_id for this report contract.",
+        )
+    try:
+        record, replayed = request.app.state.evidence_store.create_report(
+            context,
+            report,
+            request.app.state.clock.now(),
+        )
+    except ReportConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="The client record ID was already used for a different report payload.",
+        ) from None
+    return {
+        "report_id": record["id"],
+        "accepted_at": record["recorded_at"],
+        "status": record["status"],
+        "deduplicated_replay": replayed,
+        "warnings": record["warnings"],
+        "revision": record["revision"],
+    }
+
+
+@router.get("/reports", tags=["evidence"], response_model=None)
+async def list_reports(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+    limit: int = Query(default=25, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=256),
+) -> dict[str, Any]:
+    try:
+        items, next_cursor = request.app.state.evidence_store.list_reports(context, limit, cursor)
+    except ValueError:
+        raise ApiProblem(
+            status=422,
+            code="INVALID_CURSOR",
+            title="Invalid report cursor",
+            detail="The report cursor is malformed or expired.",
+        ) from None
+    return {"items": items, "next_cursor": next_cursor}
+
+
+@router.get("/reports/{report_id}", tags=["evidence"], response_model=None)
+async def get_report(
+    request: Request,
+    report_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.evidence_store.get_report(context, report_id)
+    except ReportNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="REPORT_NOT_FOUND",
+            title="Report not found",
+            detail="The report is not available in the current tenant/workspace scope.",
+        ) from None
+
+
+@router.post("/demo/seed", tags=["evidence"], response_model=None)
+async def seed_demo(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+) -> dict[str, Any]:
+    created = request.app.state.evidence_store.seed_demo(context, request.app.state.clock.now())
+    return {"synthetic": True, "created": created, "workspace_id": context.workspace_id}
+
+
+def _parse_bbox(raw_bbox: str | None) -> tuple[float, float, float, float] | None:
+    if raw_bbox is None:
+        return None
+    try:
+        values = tuple(float(part.strip()) for part in raw_bbox.split(","))
+    except ValueError:
+        raise ValueError from None
+    if len(values) != 4 or values[0] >= values[2] or values[1] >= values[3]:
+        raise ValueError
+    if (
+        not -180 <= values[0] <= 180
+        or not -180 <= values[2] <= 180
+        or not -90 <= values[1] <= 90
+        or not -90 <= values[3] <= 90
+    ):
+        raise ValueError
+    return values  # type: ignore[return-value]
+
+
+@router.get("/map/features", tags=["geospatial"], response_model=None)
+async def map_features(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("map:read"))],
+    limit: int = Query(default=100, ge=1, le=100),
+    bbox: str | None = Query(default=None, max_length=128),
+) -> dict[str, Any]:
+    try:
+        parsed_bbox = _parse_bbox(bbox)
+    except ValueError:
+        raise ApiProblem(
+            status=422,
+            code="INVALID_BBOX",
+            title="Invalid map bounds",
+            detail="bbox must be min_longitude,min_latitude,max_longitude,max_latitude in WGS84.",
+        ) from None
+    return request.app.state.evidence_store.map_features(context, limit, parsed_bbox)
