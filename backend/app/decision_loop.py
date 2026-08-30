@@ -24,6 +24,7 @@ class InMemoryDecisionStore:
         self.scenarios: dict[str, dict[str, Any]] = {}
         self.recommendations: dict[str, dict[str, Any]] = {}
         self.decisions: dict[str, dict[str, Any]] = {}
+        self.audit_events: list[dict[str, Any]] = []
 
     def replay(self, context: RequestContext, now: datetime) -> dict[str, Any]:
         self.scenarios = {
@@ -41,10 +42,14 @@ class InMemoryDecisionStore:
         }
         self.recommendations = {}
         self.decisions = {}
+        self.audit_events = []
         self.operations_store.resources.clear()
         self.operations_store.queue.clear()
         self.operations_store.tasks.clear()
         self.operations_store.seed_demo(context, now)
+        self.audit_events.append(
+            {"event": "scenario_replayed", "actor_id": context.actor_id, "at": now.isoformat()}
+        )
         return self.scenarios[context.workspace_id]
 
     def get_scenario(self, context: RequestContext) -> dict[str, Any]:
@@ -81,6 +86,14 @@ class InMemoryDecisionStore:
             "workspace_id": context.workspace_id,
         }
         self.recommendations[recommendation["id"]] = recommendation
+        self.audit_events.append(
+            {
+                "event": "recommendation_created",
+                "recommendation_id": recommendation["id"],
+                "actor_id": context.actor_id,
+                "at": now.isoformat(),
+            }
+        )
         return dict(recommendation)
 
     def decide(
@@ -99,4 +112,16 @@ class InMemoryDecisionStore:
         recommendation["decision_note"] = response.note
         recommendation["auto_dispatched"] = False
         self.decisions[recommendation_id] = dict(recommendation)
+        self.audit_events.append(
+            {
+                "event": f"recommendation_{recommendation['status']}",
+                "recommendation_id": recommendation_id,
+                "actor_id": context.actor_id,
+                "at": now.isoformat(),
+                "auto_dispatched": False,
+            }
+        )
         return dict(recommendation)
+
+    def audit(self, context: RequestContext) -> list[dict[str, Any]]:
+        return [dict(event) for event in self.audit_events]

@@ -326,3 +326,10 @@ async def decide_recommendation(
             title="Recommendation not found",
             detail="The recommendation is outside the current scope.",
         ) from None
+
+
+@router.get("/decision-loop/audit", tags=["decision-loop"], response_model=None)
+async def decision_audit(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:read"))]
+) -> dict[str, Any]:
+    return {"items": request.app.state.decision_store.audit(context)}
