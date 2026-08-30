@@ -8,6 +8,7 @@ from app.core.errors import install_problem_handlers
 from app.core.middleware import CorrelationIdMiddleware, RequestGuardMiddleware
 from app.decision_loop import InMemoryDecisionStore, PostgreSQLDecisionStore
 from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
+from app.offline_sync import OfflineSyncStore
 from app.operations import InMemoryOperationsStore, OperationsStore, PostgreSQLOperationsStore
 from app.shelter_state import PostgreSQLShelterStateStore, ShelterStateStore
 
@@ -28,6 +29,7 @@ def create_app(
     )
     app.state.settings = resolved_settings
     app.state.clock = clock or SystemClock()
+    app.state.offline_sync_store = OfflineSyncStore()
     app.state.evidence_store = evidence_store or PostgreSQLEvidenceStore(
         resolved_settings.database_url
     )

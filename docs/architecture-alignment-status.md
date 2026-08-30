@@ -111,6 +111,19 @@ Verification update: `npm --prefix frontend run build` (TypeScript + Vite produc
 
 Limitations: read-only intelligence endpoints are not yet aggregated into one frontend client, so this checkpoint uses clearly labeled local fixtures for the complete operator flow.
 
+## `offline-sync`
+
+**Status:** Implemented as a minimum honest field PWA workflow with explicit server authority.
+
+- `backend/app/offline_sync.py` provides a bounded (20-command) authenticated/scoped reconciliation API for report, acknowledgement, en_route, completion, route-observation, and outcome commands. Client IDs and timestamps are preserved; each result is accepted, replayed, conflict, or rejected.
+- Per-aggregate sequence checks stop later commands after an unresolved ordering conflict; the expected sequence can resolve the block. Duplicate command IDs replay without reapplying.
+- `frontend/src/features/operator/offline.ts` provides a bounded IndexedDB outbox, retry behavior, last-sync/unsent/conflict visibility, printable task packets, and paper/radio fallback. Only task/command metadata is cached.
+- `POST /api/v1/offline-sync` authenticates `operations:write` and enforces tenant/workspace scope.
+
+Verification update: `pytest backend/tests -q` = **60 passed**; `npm --prefix frontend run build` passed TypeScript and production Vite build; Ruff and diff check passed.
+
+Limitations: this is not offline synchronization, GPS tracking, mesh networking, background upload, or shell-cache authority. Conflicted items remain client-side until an in-order command resolves them; server reconciliation is authoritative.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

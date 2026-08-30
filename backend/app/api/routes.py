@@ -17,6 +17,7 @@ from app.evidence import (
     ReportCreate,
     ReportNotFoundError,
 )
+from app.offline_sync import SyncBatch
 from app.operations import (
     IdempotencyConflictError,
     QueueItemCreate,
@@ -408,6 +409,17 @@ async def build_decision_snapshot_path(
             detail="Snapshot sources must match the caller scope.",
         )
     return build_decision_snapshot(request).model_dump(mode="json")
+
+
+@router.post("/offline-sync", tags=["operations"], response_model=None)
+async def reconcile_offline_commands(
+    batch: SyncBatch,
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    return request.app.state.offline_sync_store.reconcile(
+        batch, context.tenant_id, context.workspace_id, request.app.state.clock.now()
+    )
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)
