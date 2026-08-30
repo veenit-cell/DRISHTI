@@ -172,6 +172,15 @@ Verification update: `pytest -q` from `backend` = **71 passed**; focused polling
 
 Limitations: polling is the required path; no broker or WebSocket transport is included. The packet-local feed is process memory and must be replaced with committed outbox/audit reads for multi-process deployment. Queue/job gauges are bounded demo values until stores expose aggregate counts.
 
+## `reliability-recovery`
+
+**Status:** Implemented as a guarded local evidence workflow; no production or cloud claim.
+
+- `scripts/reliability-recovery.ps1` applies migrations, seeds/replays synthetic data, checks readiness and audit integrity, backs up to an explicit repository-local disposable path, restores only to a name matching `ev2_recovery_*`, and compares key counts.
+- `docs/reliability-recovery.md` documents clean start, degraded readiness behavior, manual paper/radio fallback, and the rule that unavailable Docker/PostgreSQL tooling is recorded as unverified.
+
+Verification update: script structure and target guards reviewed; live Docker/PostGIS backup/restore execution is **unverified** when the platform is unavailable. No shared or unresolved database target was touched.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.
