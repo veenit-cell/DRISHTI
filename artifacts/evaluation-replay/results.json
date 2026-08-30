@@ -1,0 +1,64 @@
+﻿{
+  "ablation": {
+    "metrics": {
+      "critical_failures_before_threshold": 2,
+      "explanation_completeness": 0.35,
+      "infeasible_assignments": 1,
+      "unknown_sectors_surfaced": 0
+    },
+    "removed": [
+      "dependency_reasoning",
+      "verification_value"
+    ]
+  },
+  "baseline": {
+    "critical_failures_before_threshold": 2,
+    "explanation_completeness": 0.35,
+    "infeasible_assignments": 1,
+    "unknown_sectors_surfaced": 0
+  },
+  "baseline_method": "report_volume_plus_manual_asset_availability",
+  "dependency_aware": {
+    "critical_failures_before_threshold": 3,
+    "explanation_completeness": 1.0,
+    "infeasible_assignments": 0,
+    "unknown_sectors_surfaced": 2
+  },
+  "dependency_inputs": {
+    "battery": 2.2,
+    "cold_chain": 4.0,
+    "influx": 180,
+    "purification_power_cost": 1,
+    "water": 3.5
+  },
+  "future_records_excluded": 1,
+  "input_hash": "d3214f761f6826a80b5201d94aee46d15fb59ef17e63a0a49995817ceaf48e58",
+  "lifecycle": [
+    "commander_approved",
+    "task_assigned",
+    "task_acknowledged",
+    "task_en_route",
+    "task_completed",
+    "outcome_recorded",
+    "audit_verified"
+  ],
+  "provenance": "synthetic_evaluation_fixture",
+  "record_count": 120,
+  "replay_at": "2026-08-30T12:00:00+00:00",
+  "result_hash": "1bccaf48fc3b74d40419a6c8aff3fcbd64f015e5c9be42d296fd1ae2f735af25",
+  "runtime_ms": 1,
+  "scenario_signals": [
+    "contradictory_reports",
+    "unknown_sectors",
+    "stale_routes_readiness",
+    "population_influx",
+    "water_contamination",
+    "power_decline",
+    "purification_dependency",
+    "cold_chain_pressure",
+    "constrained_resources"
+  ],
+  "synthetic": true,
+  "total_fixture_records": 121,
+  "version": "evaluation_replay_v1"
+}

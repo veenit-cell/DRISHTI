@@ -181,6 +181,17 @@ Limitations: polling is the required path; no broker or WebSocket transport is i
 
 Verification update: script structure and target guards reviewed; live Docker/PostGIS backup/restore execution is **unverified** when the platform is unavailable. No shared or unresolved database target was touched.
 
+## `evaluation-replay`
+
+**Status:** Implemented as a reproducible synthetic evaluation package.
+
+- `backend/app/evaluation_replay.py` creates 121 provenance-labelled records with event-time replay filtering, contradictions, unknown/stale signals, dependency inputs, bounded lifecycle, baseline/ablation metrics, and canonical hashes.
+- `scripts/run-evaluation-replay.ps1` emits raw JSON and a concise comparison; future information is excluded before scoring. Results finish through commander approval, task lifecycle, outcome, and audit verification as an explicit synthetic contract.
+
+Verification update: `pytest -q tests/test_evaluation_replay.py` = **2 passed**; replay command executed and produced stable result hash `900ba1d3ce623b8471453bed10953793f391df6e768e843abfcbcb6d09544b89`.
+
+Limitations: metrics are transparent fixture outputs, not measured superiority, accuracy, or operational validation.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.
