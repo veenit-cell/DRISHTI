@@ -5,7 +5,7 @@ from app.api.routes import router
 from app.core.clock import Clock, SystemClock
 from app.core.config import Settings, get_settings
 from app.core.errors import install_problem_handlers
-from app.core.middleware import CorrelationIdMiddleware
+from app.core.middleware import CorrelationIdMiddleware, RequestGuardMiddleware
 from app.decision_loop import InMemoryDecisionStore, PostgreSQLDecisionStore
 from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
 from app.operations import InMemoryOperationsStore, OperationsStore, PostgreSQLOperationsStore
@@ -44,6 +44,10 @@ def create_app(
         allow_credentials=False,
         allow_methods=["GET"],
         allow_headers=["Content-Type", "X-Correlation-ID", "X-Dev-Identity"],
+    )
+    app.add_middleware(
+        RequestGuardMiddleware,
+        max_body_bytes=1_000_000,
     )
     app.add_middleware(
         CorrelationIdMiddleware,

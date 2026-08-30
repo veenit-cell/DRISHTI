@@ -16,6 +16,14 @@ Remaining: direct evidence/incident IDs in recommendation inputs, full field out
 
 Recommendation expiry is now enforced in both adapters (four-hour synthetic horizon). The first half remains demo-complete but not production-complete: aggregate revisions, cross-module atomic replay reset, full evidence references, spatial coverage, capacity modeling, alternatives/exclusions, and field outcomes remain open.
 
+## Second-half pass started
+
+- Request bodies are bounded to 1 MB with a structured `413` response.
+- Request completion emits structured logger fields for method, path, and duration.
+- Existing health/readiness and job/polling surfaces remain the local observability baseline.
+
+Still open: real authentication/RLS, worker execution/retries, WebSockets, backup/restore drills, vulnerability/SBOM evidence, and production deployment proof.
+
 ## Next three gaps
 
 | Gap | Status | Evidence |
