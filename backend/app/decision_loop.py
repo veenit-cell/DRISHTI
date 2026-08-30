@@ -3,6 +3,7 @@
 import copy
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -13,6 +14,7 @@ from app.operations import (
     IdempotencyConflictError,
     OperationsStore,
     PostgreSQLOperationsStore,
+    QueueItemCreate,
     _opaque_id,
     _request_hash,
 )
@@ -23,6 +25,7 @@ class DecisionResponse(BaseModel):
 
     decision: str = Field(pattern="^(approve|reject)$")
     note: str | None = Field(default=None, max_length=500)
+    resource_id: str | None = None
 
 
 class DecisionNotFoundError(Exception):
@@ -130,6 +133,11 @@ class InMemoryDecisionStore:
             "compatible_resources": compatible,
             "reasons": reasons,
             "rule": "water_attention_v1",
+            "priority": 100,
+            "evidence_refs": ["scenario_fixed_north_sector_v1:signals"],
+            "input_snapshot": signals,
+            "input_hash": _request_hash(signals),
+            "expected_effect": "protect potable-water continuity before the 3.5 hour runway threshold",
             "auto_dispatched": False,
             "created_at": now.isoformat(),
             "workspace_id": context.workspace_id,
@@ -171,6 +179,28 @@ class InMemoryDecisionStore:
         recommendation["decided_at"] = now.isoformat()
         recommendation["decision_note"] = response.note
         recommendation["auto_dispatched"] = False
+        if response.decision == "approve":
+            chosen = response.resource_id or (
+                recommendation["compatible_resources"][0]["id"]
+                if recommendation["compatible_resources"]
+                else None
+            )
+            if chosen is None or chosen not in {
+                r["id"] for r in recommendation["compatible_resources"]
+            }:
+                raise DecisionNotFoundError
+            queue = self.operations_store.create_queue(
+                context,
+                QueueItemCreate(
+                    title=recommendation["action"],
+                    priority="critical",
+                    destination=recommendation["sector"],
+                    required_capability="water_delivery",
+                ),
+                now,
+                f"recommendation-queue-{recommendation_id}",
+            )
+            recommendation["queue_item_id"] = queue["id"]
         self.audit_events.append(
             {
                 "event": f"recommendation_{recommendation['status']}",
@@ -339,6 +369,11 @@ class PostgreSQLDecisionStore:
             "compatible_resources": compatible,
             "reasons": reasons,
             "rule": "water_attention_v1",
+            "priority": 100,
+            "evidence_refs": ["scenario_fixed_north_sector_v1:signals"],
+            "input_snapshot": signals,
+            "input_hash": _request_hash(signals),
+            "expected_effect": "protect potable-water continuity before the 3.5 hour runway threshold",
             "auto_dispatched": False,
             "created_at": now.isoformat(),
         }
@@ -348,7 +383,7 @@ class PostgreSQLDecisionStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "INSERT INTO recommendations (id, organization_id, workspace_id, status, action, sector, compatible_resources, reasons, rule, auto_dispatched, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, false, %s)",
+                "INSERT INTO recommendations (id, organization_id, workspace_id, status, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, auto_dispatched, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, %s)",
                 (
                     recommendation["id"],
                     context.tenant_id,
@@ -359,6 +394,11 @@ class PostgreSQLDecisionStore:
                     Jsonb(compatible),
                     Jsonb(reasons),
                     recommendation["rule"],
+                    recommendation["priority"],
+                    Jsonb(recommendation["evidence_refs"]),
+                    Jsonb(recommendation["input_snapshot"]),
+                    recommendation["input_hash"],
+                    recommendation["expected_effect"],
                     now,
                 ),
             )
@@ -393,7 +433,7 @@ class PostgreSQLDecisionStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "SELECT id, action, sector, compatible_resources, reasons, rule, created_at FROM recommendations WHERE id = %s AND organization_id = %s AND workspace_id = %s AND status = 'pending_approval' FOR UPDATE",
+                "SELECT id, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, created_at FROM recommendations WHERE id = %s AND organization_id = %s AND workspace_id = %s AND status = 'pending_approval' FOR UPDATE",
                 (recommendation_id, context.tenant_id, context.workspace_id),
             )
             row = cursor.fetchone()
@@ -404,6 +444,29 @@ class PostgreSQLDecisionStore:
                 "UPDATE recommendations SET status = %s, decided_by = %s, decided_at = %s, decision_note = %s WHERE id = %s",
                 (status, context.actor_id, now, response.note, recommendation_id),
             )
+            queue_id = None
+            if response.decision == "approve":
+                resources = row[3] or []
+                chosen = response.resource_id or (resources[0]["id"] if resources else None)
+                if chosen is None or chosen not in {r["id"] for r in resources}:
+                    raise DecisionNotFoundError
+                queue_id = str(uuid4())
+                cursor.execute(
+                    "INSERT INTO response_queue_items (id, organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, status, created_at) VALUES (%s,%s,%s,%s,'critical',%s,%s,'response','water_delivery','queued',%s)",
+                    (
+                        queue_id,
+                        context.tenant_id,
+                        context.workspace_id,
+                        row[1],
+                        row[2],
+                        f"from recommendation {recommendation_id}",
+                        now,
+                    ),
+                )
+                cursor.execute(
+                    "UPDATE recommendations SET queue_item_id=%s WHERE id=%s",
+                    (queue_id, recommendation_id),
+                )
             cursor.execute(
                 "INSERT INTO recommendation_decisions (id, recommendation_id, organization_id, workspace_id, decision, actor_id, note, decided_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                 (
@@ -425,8 +488,14 @@ class PostgreSQLDecisionStore:
                 "compatible_resources": row[3],
                 "reasons": row[4],
                 "rule": row[5],
+                "priority": row[6],
+                "evidence_refs": row[7],
+                "input_snapshot": row[8],
+                "input_hash": row[9],
+                "expected_effect": row[10],
+                "queue_item_id": queue_id,
                 "auto_dispatched": False,
-                "created_at": row[6].isoformat(),
+                "created_at": row[11].isoformat(),
                 "decided_by": context.actor_id,
                 "decided_at": now.isoformat(),
                 "decision_note": response.note,
