@@ -28,6 +28,12 @@ from app.operations import (
     TaskStatusUpdate,
 )
 from app.persistence import database_ready
+from app.shelter_state import (
+    ShelterConflictError,
+    ShelterCreate,
+    ShelterNotFoundError,
+    ShelterObservationCreate,
+)
 
 router = APIRouter()
 
@@ -244,6 +250,108 @@ async def list_incidents(
     context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
 ) -> dict[str, Any]:
     return {"items": request.app.state.evidence_store.list_incidents(context)}
+
+
+@router.post("/shelters", tags=["shelter-state"], status_code=201, response_model=None)
+async def create_shelter(
+    request: Request,
+    shelter: ShelterCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("state:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.shelter_state_store.create_shelter(
+            context, shelter, request.app.state.clock.now()
+        )
+    except ShelterConflictError:
+        raise ApiProblem(
+            status=409,
+            code="SHELTER_CONFLICT",
+            title="Shelter identity conflict",
+            detail="The shelter ID already exists with different immutable metadata.",
+        ) from None
+
+
+@router.get("/shelters", tags=["shelter-state"], response_model=None)
+async def list_shelters(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("state:read"))]
+) -> dict[str, Any]:
+    return {"items": request.app.state.shelter_state_store.list_shelters(context)}
+
+
+@router.post(
+    "/shelters/{shelter_id}/observations",
+    tags=["shelter-state"],
+    status_code=201,
+    response_model=None,
+)
+async def create_shelter_observation(
+    request: Request,
+    shelter_id: str,
+    observation: ShelterObservationCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("state:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.shelter_state_store.create_observation(
+            context, shelter_id, observation, request.app.state.clock.now(), idempotency_key
+        )
+    except ShelterNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="SHELTER_NOT_FOUND",
+            title="Shelter not found",
+            detail="The shelter is outside the current tenant/workspace scope.",
+        ) from None
+    except ShelterConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different observation payload.",
+        ) from None
+
+
+@router.get("/shelters/{shelter_id}/observations", tags=["shelter-state"], response_model=None)
+async def list_shelter_observations(
+    request: Request,
+    shelter_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("state:read"))],
+) -> dict[str, Any]:
+    try:
+        return {
+            "items": request.app.state.shelter_state_store.list_observations(context, shelter_id)
+        }
+    except ShelterNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="SHELTER_NOT_FOUND",
+            title="Shelter not found",
+            detail="The shelter is outside the current tenant/workspace scope.",
+        ) from None
+
+
+@router.get("/shelters/{shelter_id}/state", tags=["shelter-state"], response_model=None)
+async def get_shelter_state(
+    request: Request,
+    shelter_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("state:read"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.shelter_state_store.get_state(context, shelter_id)
+    except ShelterNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="SHELTER_NOT_FOUND",
+            title="Shelter not found",
+            detail="The shelter is outside the current tenant/workspace scope.",
+        ) from None
+
+
+@router.post("/shelter-state/demo/seed", tags=["shelter-state"], response_model=None)
+async def seed_shelter_state_demo(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("state:write"))]
+) -> dict[str, Any]:
+    return request.app.state.shelter_state_store.seed_demo(context, request.app.state.clock.now())
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)

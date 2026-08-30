@@ -9,12 +9,14 @@ from app.core.middleware import CorrelationIdMiddleware, RequestGuardMiddleware
 from app.decision_loop import InMemoryDecisionStore, PostgreSQLDecisionStore
 from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
 from app.operations import InMemoryOperationsStore, OperationsStore, PostgreSQLOperationsStore
+from app.shelter_state import PostgreSQLShelterStateStore, ShelterStateStore
 
 
 def create_app(
     settings: Settings | None = None,
     evidence_store: EvidenceStore | None = None,
     operations_store: OperationsStore | None = None,
+    shelter_state_store: ShelterStateStore | None = None,
     clock: Clock | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
@@ -33,6 +35,9 @@ def create_app(
         resolved_settings.database_url
     )
     app.state.operations_store = resolved_operations_store
+    app.state.shelter_state_store = shelter_state_store or PostgreSQLShelterStateStore(
+        resolved_settings.database_url
+    )
     app.state.decision_store = (
         InMemoryDecisionStore(resolved_operations_store)
         if isinstance(resolved_operations_store, InMemoryOperationsStore)
