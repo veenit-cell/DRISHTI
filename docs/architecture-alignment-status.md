@@ -72,6 +72,19 @@ Verification update: `pytest backend/tests/test_what_if.py -q` = **3 passed**; f
 
 Limitations: interventions are synthetic, single-action comparisons over caller-provided runway inputs; no live state, transfer workflow, or persistence is involved.
 
+## `decision-policy`
+
+**Status:** Implemented as a versioned deterministic intervention policy (`intervention_policy_v1`).
+
+- `backend/app/decision_policy.py` accepts typed snapshot, runway projection, cascade, and resource adapters and generates/ranks three bounded candidates: water delivery/treatment, non-critical power shifting, and medicine/cold-chain support.
+- Candidates include evidence, reasons, resource cost, expected benefit/effect, time sensitivity, confidence, expiry, input hash, excluded resources/reasons, and remain `pending_approval`.
+- Readiness, capability, route, expiry, and active-task constraints are hard exclusions. Stable sorting and an explicit all-infeasible greedy fallback keep execution bounded and reproducible.
+- `POST /api/v1/decision-policy/evaluate` is evaluation-only. Existing recommendation responses now expose policy candidates; commander approval remains queue-only and `auto_dispatched=false`.
+
+Verification update: `pytest backend/tests/test_decision_policy.py backend/tests/test_decision_loop.py -q` = **5 passed**; full suite and Ruff recorded in handoff.
+
+Limitations: resource effects are synthetic policy signals; PostgreSQL recommendation persistence retains the existing schema and does not persist the full candidate set as separate rows.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

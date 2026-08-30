@@ -7,6 +7,7 @@ from app.cascade import CascadeRequest, evaluate_cascade
 from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
 from app.decision_loop import DecisionNotFoundError, DecisionResponse
+from app.decision_policy import PolicyRequest, evaluate_policy
 from app.evidence import (
     EvidenceReview,
     IncidentLink,
@@ -382,6 +383,15 @@ async def evaluate_what_if_path(
 ) -> dict[str, Any]:
     del context
     return evaluate_what_if(request).model_dump(mode="json")
+
+
+@router.post("/decision-policy/evaluate", tags=["decision-loop"], response_model=None)
+async def evaluate_decision_policy(
+    request: PolicyRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    del context
+    return evaluate_policy(request).model_dump(mode="json")
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)

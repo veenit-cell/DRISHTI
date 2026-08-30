@@ -10,6 +10,14 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.context import RequestContext
+from app.decision_policy import (
+    CascadeAdapter,
+    PolicyRequest,
+    PolicySnapshot,
+    ProjectionAdapter,
+    ResourceAdapter,
+    evaluate_policy,
+)
 from app.operations import (
     IdempotencyConflictError,
     OperationsStore,
@@ -143,6 +151,36 @@ class InMemoryDecisionStore:
             "created_at": now.isoformat(),
             "workspace_id": context.workspace_id,
         }
+        policy = evaluate_policy(
+            PolicyRequest(
+                snapshot=PolicySnapshot(
+                    observed_at=now,
+                    values={"population_influx": signals["population_influx"]},
+                    freshness_state="fresh",
+                ),
+                projections=[
+                    ProjectionAdapter(
+                        resource="potable_water",
+                        state="projected",
+                        time_to_critical_hours=signals["water_runway_hours"],
+                        confidence="medium",
+                    )
+                ],
+                cascades=[CascadeAdapter(affected_capability="safe_water_runway", severity="high", supporting_input_refs=["scenario_fixed_north_sector_v1:signals"])],
+                resources=[
+                    ResourceAdapter(
+                        id=item["id"],
+                        capabilities=item.get("capabilities", []),
+                        readiness=item["readiness"],
+                        readiness_expires_at=datetime.fromisoformat(item["readiness_expires_at"]) if item.get("readiness_expires_at") else None,
+                        route_passable=True,
+                    )
+                    for item in self.operations_store.list_resources(context)
+                ],
+                now=now,
+            )
+        )
+        recommendation["candidates"] = [item.model_dump(mode="json") for item in policy.candidates]
         self.recommendations[recommendation["id"]] = recommendation
         self.audit_events.append(
             {
