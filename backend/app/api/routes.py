@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
+from app.decision_loop import DecisionNotFoundError, DecisionResponse
 from app.evidence import ReportConflictError, ReportCreate, ReportNotFoundError
 from app.operations import (
     QueueItemCreate,
@@ -279,4 +280,49 @@ async def update_task(
             code="TASK_NOT_FOUND",
             title="Task not found",
             detail="The task is outside the current scope.",
+        ) from None
+
+
+@router.post("/decision-loop/demo/replay", tags=["decision-loop"], response_model=None)
+async def replay_decision_demo(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:write"))]
+) -> dict[str, Any]:
+    return request.app.state.decision_store.replay(context, request.app.state.clock.now())
+
+
+@router.get("/decision-loop/scenario", tags=["decision-loop"], response_model=None)
+async def get_decision_scenario(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:read"))]
+) -> dict[str, Any]:
+    return request.app.state.decision_store.get_scenario(context)
+
+
+@router.post("/decision-loop/recommendations", tags=["decision-loop"], response_model=None)
+async def create_recommendation(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:write"))]
+) -> dict[str, Any]:
+    return request.app.state.decision_store.recommend(context, request.app.state.clock.now())
+
+
+@router.post(
+    "/decision-loop/recommendations/{recommendation_id}/decision",
+    tags=["decision-loop"],
+    response_model=None,
+)
+async def decide_recommendation(
+    request: Request,
+    recommendation_id: str,
+    response: DecisionResponse,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.decision_store.decide(
+            context, recommendation_id, response, request.app.state.clock.now()
+        )
+    except DecisionNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="RECOMMENDATION_NOT_FOUND",
+            title="Recommendation not found",
+            detail="The recommendation is outside the current scope.",
         ) from None

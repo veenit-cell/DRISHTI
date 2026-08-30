@@ -6,6 +6,7 @@ from app.core.clock import Clock, SystemClock
 from app.core.config import Settings, get_settings
 from app.core.errors import install_problem_handlers
 from app.core.middleware import CorrelationIdMiddleware
+from app.decision_loop import InMemoryDecisionStore
 from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
 from app.operations import InMemoryOperationsStore
 
@@ -29,6 +30,7 @@ def create_app(
         resolved_settings.database_url
     )
     app.state.operations_store = operations_store or InMemoryOperationsStore()
+    app.state.decision_store = InMemoryDecisionStore(app.state.operations_store)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[str(origin) for origin in resolved_settings.allowed_origins],

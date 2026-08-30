@@ -31,6 +31,8 @@ _DEVELOPMENT_IDENTITIES = {
                 "map:read",
                 "operations:read",
                 "operations:write",
+                "decision:read",
+                "decision:write",
             }
         ),
     },
@@ -39,7 +41,9 @@ _DEVELOPMENT_IDENTITIES = {
         "role": "viewer",
         "tenant_id": "org_demo",
         "workspace_id": "evt_demo",
-        "scopes": frozenset({"system:read", "evidence:read", "map:read", "operations:read"}),
+        "scopes": frozenset(
+            {"system:read", "evidence:read", "map:read", "operations:read", "decision:read"}
+        ),
     },
 }
 
