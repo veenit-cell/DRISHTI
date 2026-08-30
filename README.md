@@ -1,4 +1,4 @@
-# EV2 District Disaster Decision Support
+# D.R.I.S.H.T.I - Disaster Response Intelligence System for Human Triage Intelligence
 
 Phase 1 provides a deliberately thin foundation for the district disaster evidence and resource decision-support demo. It includes a FastAPI boundary, a React shell, executable API contracts, a development-only identity fixture, and a PostgreSQL/PostGIS foundation migration. It does not implement reports, resources, recommendations, or tasking.
 
@@ -45,6 +45,17 @@ Invoke-RestMethod -Headers @{ 'X-Dev-Identity' = 'operator' } http://127.0.0.1:8
 ```
 
 This runs backend formatting/lint checks, backend tests (including contract validation), and the frontend TypeScript production build.
+
+## Hackathon demo runbook
+
+Start the local stack with `.\scripts\dev.ps1`. In a second PowerShell window, reset the fixed synthetic scenario:
+
+```powershell
+$h = @{ 'X-Dev-Identity' = 'operator' }
+Invoke-RestMethod -Method Post -Headers $h http://127.0.0.1:8000/api/v1/decision-loop/demo/replay
+```
+
+Then open `http://127.0.0.1:5173` and use the evidence workbench. The 3–5 minute judge flow is documented in [docs/handoffs/phase-6/manifest.md](docs/handoffs/phase-6/manifest.md).
 
 ## Architecture boundary
 
