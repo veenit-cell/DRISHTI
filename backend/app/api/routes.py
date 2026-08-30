@@ -6,7 +6,14 @@ from fastapi.responses import JSONResponse
 from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
 from app.decision_loop import DecisionNotFoundError, DecisionResponse
-from app.evidence import ReportConflictError, ReportCreate, ReportNotFoundError
+from app.evidence import (
+    EvidenceReview,
+    IncidentLink,
+    IncidentNotFoundError,
+    ReportConflictError,
+    ReportCreate,
+    ReportNotFoundError,
+)
 from app.operations import (
     IdempotencyConflictError,
     QueueItemCreate,
@@ -143,6 +150,53 @@ async def get_report(
         ) from None
 
 
+@router.post("/reports/{report_id}/review", tags=["evidence"], response_model=None)
+async def review_report(
+    request: Request,
+    report_id: str,
+    review: EvidenceReview,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.evidence_store.review_report(
+            context, report_id, review, request.app.state.clock.now()
+        )
+    except ReportNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="REPORT_OR_CLAIM_NOT_FOUND",
+            title="Report or claim not found",
+            detail="The report or one of its claims is outside the current scope.",
+        ) from None
+
+
+@router.post("/reports/{report_id}/incident-links", tags=["evidence"], response_model=None)
+async def link_report_incident(
+    request: Request,
+    report_id: str,
+    link: IncidentLink,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.evidence_store.link_incident(
+            context, report_id, link, request.app.state.clock.now()
+        )
+    except ReportNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="REPORT_NOT_FOUND",
+            title="Report not found",
+            detail="The report is outside the current tenant/workspace scope.",
+        ) from None
+    except IncidentNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="INCIDENT_NOT_FOUND",
+            title="Incident not found",
+            detail="The incident is outside the current tenant/workspace scope.",
+        ) from None
+
+
 @router.post("/demo/seed", tags=["evidence"], response_model=None)
 async def seed_demo(
     request: Request,
@@ -150,6 +204,22 @@ async def seed_demo(
 ) -> dict[str, Any]:
     created = request.app.state.evidence_store.seed_demo(context, request.app.state.clock.now())
     return {"synthetic": True, "created": created, "workspace_id": context.workspace_id}
+
+
+@router.get("/incidents", tags=["evidence"], response_model=None)
+async def list_incidents(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, Any]:
+    return {"items": request.app.state.evidence_store.list_incidents(context)}
+
+
+@router.get("/sectors", tags=["geospatial"], response_model=None)
+async def list_sectors(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("map:read"))],
+) -> dict[str, Any]:
+    return {"items": request.app.state.evidence_store.list_sectors(context)}
 
 
 def _parse_bbox(raw_bbox: str | None) -> tuple[float, float, float, float] | None:

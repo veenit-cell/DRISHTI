@@ -147,9 +147,46 @@ def test_seed_and_bounded_map_features(client: TestClient) -> None:
 
     bounded = client.get("/api/v1/map/features?bbox=91.73,26.18,91.75,26.19", headers=HEADERS)
     assert bounded.status_code == 200
-    assert len(bounded.json()["features"]) == 1
-    assert bounded.json()["features"][0]["id"] == "inc_demo_north"
+    assert {feature["id"] for feature in bounded.json()["features"]} >= {"inc_demo_north"}
+    assert any(
+        feature["properties"]["feature_kind"] == "sector" for feature in bounded.json()["features"]
+    )
 
     invalid_bbox = client.get("/api/v1/map/features?bbox=91,26,90,27", headers=HEADERS)
     assert invalid_bbox.status_code == 422
     assert invalid_bbox.json()["code"] == "INVALID_BBOX"
+
+
+def test_review_lineage_duplicate_candidates_and_spatial_state(client: TestClient) -> None:
+    first = create(client, valid_report("rpt_review_001"))
+    second = create(client, valid_report("rpt_review_002"))
+    assert first.status_code == second.status_code == 201
+    detail = client.get(f"/api/v1/reports/{second.json()['report_id']}", headers=HEADERS).json()
+    assert detail["duplicate_candidates"][0]["candidate_report_id"] == first.json()["report_id"]
+    claim = client.get(f"/api/v1/reports/{first.json()['report_id']}", headers=HEADERS).json()[
+        "claims"
+    ][0]
+    reviewed = client.post(
+        f"/api/v1/reports/{first.json()['report_id']}/review",
+        headers=HEADERS,
+        json={"claim_updates": {claim["id"]: "corroborated"}, "note": "Operator verified"},
+    )
+    assert reviewed.status_code == 200
+    assert reviewed.json()["status"] == "reviewed"
+    assert reviewed.json()["claims"][0]["verification_state"] == "corroborated"
+
+    assert client.post("/api/v1/demo/seed", headers=HEADERS).status_code == 200
+    linked = client.post(
+        f"/api/v1/reports/{first.json()['report_id']}/incident-links",
+        headers=HEADERS,
+        json={"incident_id": "inc_demo_north"},
+    )
+    assert linked.status_code == 200
+    assert client.get("/api/v1/incidents", headers=HEADERS).json()["items"]
+    sectors = client.get("/api/v1/sectors", headers=HEADERS)
+    assert sectors.status_code == 200
+    assert {item["assessment_state"] for item in sectors.json()["items"]} >= {
+        "assessed",
+        "unassessed",
+        "inaccessible",
+    }

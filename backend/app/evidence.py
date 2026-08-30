@@ -27,6 +27,14 @@ class SourceInput(BaseModel):
     source_class: str = Field(min_length=1, max_length=64)
 
 
+class AttachmentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    media_type: str = Field(pattern=r"^(image/jpeg|image/png|application/pdf|text/plain)$")
+    byte_size: int = Field(ge=1, le=5_000_000)
+    sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+
+
 class LocationInput(BaseModel):
     geometry: dict[str, Any]
     uncertainty_m: int | None = Field(default=None, ge=0)
@@ -59,6 +67,7 @@ class ReportCreate(BaseModel):
     location: LocationInput | None = None
     report_type: str = Field(min_length=1, max_length=64)
     facts: dict[str, Any] = Field(default_factory=dict)
+    attachments: list[AttachmentInput] = Field(default_factory=list, max_length=5)
     privacy_class: str = Field(
         default="restricted_operational", pattern=r"^(restricted_operational|internal)$"
     )
@@ -77,6 +86,30 @@ class ReportConflictError(Exception):
 
 class ReportNotFoundError(Exception):
     """The scoped report does not exist."""
+
+
+class IncidentNotFoundError(Exception):
+    """The scoped incident does not exist."""
+
+
+class EvidenceReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    claim_updates: dict[str, str] = Field(default_factory=dict)
+    note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def valid_claim_states(self) -> EvidenceReview:
+        allowed = {"proposed", "unknown", "corroborated", "contradicted", "stale", "superseded"}
+        if any(state not in allowed for state in self.claim_updates.values()):
+            raise ValueError("Unsupported claim verification state")
+        return self
+
+
+class IncidentLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    incident_id: str = Field(min_length=1, max_length=128)
 
 
 def _utc_iso(value: datetime | None) -> str | None:
@@ -181,6 +214,18 @@ class EvidenceStore(Protocol):
         bbox: tuple[float, float, float, float] | None,
     ) -> dict[str, Any]: ...
 
+    def review_report(
+        self, context: RequestContext, report_id: str, review: EvidenceReview, reviewed_at: datetime
+    ) -> dict[str, Any]: ...
+
+    def link_incident(
+        self, context: RequestContext, report_id: str, link: IncidentLink, linked_at: datetime
+    ) -> dict[str, Any]: ...
+
+    def list_incidents(self, context: RequestContext) -> list[dict[str, Any]]: ...
+
+    def list_sectors(self, context: RequestContext) -> list[dict[str, Any]]: ...
+
 
 def _summary(record: dict[str, Any]) -> dict[str, Any]:
     return {
@@ -217,7 +262,11 @@ def _in_bbox(
     if geometry is None:
         return False
     coordinates = geometry.get("coordinates")
-    if not isinstance(coordinates, list) or len(coordinates) != 2:
+    if not isinstance(coordinates, list):
+        return False
+    while coordinates and isinstance(coordinates[0], list):
+        coordinates = coordinates[0]
+    if len(coordinates) != 2 or not all(isinstance(value, int | float) for value in coordinates):
         return False
     longitude, latitude = coordinates
     return bbox[0] <= longitude <= bbox[2] and bbox[1] <= latitude <= bbox[3]
@@ -228,6 +277,7 @@ def _feature_collection(
     reports: list[dict[str, Any]],
     limit: int,
     bbox: tuple[float, float, float, float] | None,
+    sectors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     features: list[dict[str, Any]] = []
     for incident in incidents:
@@ -270,6 +320,22 @@ def _feature_collection(
                     },
                 )
             )
+    for sector in sectors or []:
+        geometry = sector["geometry"]
+        if _in_bbox(geometry, bbox) or bbox is None:
+            features.append(
+                _feature(
+                    "sector",
+                    sector["id"],
+                    geometry,
+                    {
+                        "name": sector["name"],
+                        "assessment_state": sector["assessment_state"],
+                        "assessment_source": sector.get("assessment_source"),
+                        "assessed_at": sector.get("assessed_at"),
+                    },
+                )
+            )
     return {"type": "FeatureCollection", "features": features[:limit]}
 
 
@@ -281,11 +347,13 @@ class InMemoryEvidenceStore:
         self._reports: dict[str, dict[str, Any]] = {}
         self._keys: dict[tuple[str, str, str], str] = {}
         self._incidents: dict[str, dict[str, Any]] = {}
+        self._sectors: dict[str, dict[str, Any]] = {}
+        self._links: set[tuple[str, str]] = set()
 
     def create_report(
         self, context: RequestContext, report: ReportCreate, recorded_at: datetime
     ) -> tuple[dict[str, Any], bool]:
-        payload = report.model_dump(mode="json")
+        payload = report.model_dump(mode="json", exclude_unset=True)
         digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
         key = (context.tenant_id, context.workspace_id, report.client_record_id)
         normalized = normalize_report(report)
@@ -309,6 +377,7 @@ class InMemoryEvidenceStore:
             "warnings": normalized["warnings"],
             "normalization": normalized,
             "claims": normalized["claims"],
+            "duplicate_candidates": [],
         }
         with self._lock:
             existing_id = self._keys.get(key)
@@ -318,6 +387,18 @@ class InMemoryEvidenceStore:
                     raise ReportConflictError
                 return copy.deepcopy(existing), True
             self._keys[key] = record["id"]
+            for existing in self._reports.values():
+                if (
+                    existing["workspace_id"] == context.workspace_id
+                    and existing["report_type"] == report.report_type
+                    and existing.get("location") == record.get("location")
+                ):
+                    candidate = {
+                        "report_id": record["id"],
+                        "candidate_report_id": existing["id"],
+                        "reason": "same report type and location",
+                    }
+                    record["duplicate_candidates"].append(candidate)
             self._reports[record["id"]] = record
         return copy.deepcopy(record), False
 
@@ -377,6 +458,35 @@ class InMemoryEvidenceStore:
         ]
         created = 0
         with self._lock:
+            for sector_id, name, state, coordinates in [
+                ("sector_demo_north", "North Sector", "assessed", [91.73, 26.18]),
+                ("sector_demo_east", "East Sector", "unassessed", [91.75, 26.19]),
+                ("sector_demo_west", "West Sector", "inaccessible", [91.72, 26.17]),
+            ]:
+                self._sectors.setdefault(
+                    sector_id,
+                    {
+                        "id": sector_id,
+                        "name": name,
+                        "assessment_state": state,
+                        "assessment_source": "synthetic_demo_seed",
+                        "assessed_at": now if state == "assessed" else None,
+                        "geometry": {
+                            "type": "Polygon",
+                            "coordinates": [
+                                [
+                                    [coordinates[0] - 0.01, coordinates[1] - 0.01],
+                                    [coordinates[0] + 0.01, coordinates[1] - 0.01],
+                                    [coordinates[0] + 0.01, coordinates[1] + 0.01],
+                                    [coordinates[0] - 0.01, coordinates[1] + 0.01],
+                                    [coordinates[0] - 0.01, coordinates[1] - 0.01],
+                                ]
+                            ],
+                        },
+                        "tenant_id": context.tenant_id,
+                        "workspace_id": context.workspace_id,
+                    },
+                )
             for incident_id, title, need_type, state, coordinates in seeds:
                 if incident_id in self._incidents:
                     continue
@@ -409,7 +519,66 @@ class InMemoryEvidenceStore:
             if value["tenant_id"] == context.tenant_id
             and value["workspace_id"] == context.workspace_id
         ]
-        return _feature_collection(incidents, reports, limit, bbox)
+        sectors = [
+            value
+            for value in self._sectors.values()
+            if value["tenant_id"] == context.tenant_id
+            and value["workspace_id"] == context.workspace_id
+        ]
+        return _feature_collection(incidents, reports, limit, bbox, sectors)
+
+    def review_report(
+        self, context: RequestContext, report_id: str, review: EvidenceReview, reviewed_at: datetime
+    ) -> dict[str, Any]:
+        record = self._reports.get(report_id)
+        if (
+            record is None
+            or record["tenant_id"] != context.tenant_id
+            or record["workspace_id"] != context.workspace_id
+        ):
+            raise ReportNotFoundError
+        claims = {claim["id"]: claim for claim in record["claims"]}
+        for claim_id, state in review.claim_updates.items():
+            if claim_id not in claims:
+                raise ReportNotFoundError
+            claims[claim_id]["verification_state"] = state
+        record["claims"] = list(claims.values())
+        record["status"] = "reviewed"
+        record["reviewed_by"] = context.actor_id
+        record["reviewed_at"] = _utc_iso(reviewed_at)
+        record["review_note"] = review.note
+        return copy.deepcopy(record)
+
+    def link_incident(
+        self, context: RequestContext, report_id: str, link: IncidentLink, linked_at: datetime
+    ) -> dict[str, Any]:
+        report = self._reports.get(report_id)
+        incident = self._incidents.get(link.incident_id)
+        if report is None or report["workspace_id"] != context.workspace_id:
+            raise ReportNotFoundError
+        if incident is None or incident["workspace_id"] != context.workspace_id:
+            raise IncidentNotFoundError
+        self._links.add((report_id, link.incident_id))
+        return {
+            "report_id": report_id,
+            "incident_id": link.incident_id,
+            "linked_by": context.actor_id,
+            "linked_at": _utc_iso(linked_at),
+        }
+
+    def list_incidents(self, context: RequestContext) -> list[dict[str, Any]]:
+        return [
+            copy.deepcopy(value)
+            for value in self._incidents.values()
+            if value["workspace_id"] == context.workspace_id
+        ]
+
+    def list_sectors(self, context: RequestContext) -> list[dict[str, Any]]:
+        return [
+            copy.deepcopy(value)
+            for value in self._sectors.values()
+            if value["workspace_id"] == context.workspace_id
+        ]
 
 
 class PostgreSQLEvidenceStore:
@@ -418,6 +587,115 @@ class PostgreSQLEvidenceStore:
 
     def _connection(self) -> psycopg.Connection[Any]:
         return psycopg.connect(self.database_url)
+
+    @staticmethod
+    def _ensure_context(cursor: Any, context: RequestContext, now: datetime) -> None:
+        cursor.execute(
+            "INSERT INTO organizations (id, name, created_at) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (context.tenant_id, "Development demo organization", now),
+        )
+        cursor.execute(
+            "INSERT INTO event_workspaces (id, organization_id, name, mode, status, event_time, created_at) VALUES (%s, %s, %s, 'live', 'active', %s, %s) ON CONFLICT (id) DO NOTHING",
+            (context.workspace_id, context.tenant_id, "Development demo event", now, now),
+        )
+        cursor.execute(
+            "INSERT INTO memberships (organization_id, actor_id, role, created_at) VALUES (%s, %s, %s, %s) ON CONFLICT (organization_id, actor_id) DO NOTHING",
+            (context.tenant_id, context.actor_id, context.role, now),
+        )
+
+    def review_report(
+        self, context: RequestContext, report_id: str, review: EvidenceReview, reviewed_at: datetime
+    ) -> dict[str, Any]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM raw_reports WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
+                (report_id, context.tenant_id, context.workspace_id),
+            )
+            if cursor.fetchone() is None:
+                raise ReportNotFoundError
+            for claim_id, state in review.claim_updates.items():
+                cursor.execute(
+                    "UPDATE report_claims SET verification_state = %s WHERE id = %s AND report_id = %s AND organization_id = %s AND workspace_id = %s",
+                    (state, claim_id, report_id, context.tenant_id, context.workspace_id),
+                )
+                if cursor.rowcount != 1:
+                    raise ReportNotFoundError
+            cursor.execute(
+                "UPDATE raw_reports SET status = 'reviewed', reviewed_by = %s, reviewed_at = %s, review_note = %s, revision = revision + 1 WHERE id = %s",
+                (context.actor_id, reviewed_at, review.note, report_id),
+            )
+        return self.get_report(context, report_id)
+
+    def link_incident(
+        self, context: RequestContext, report_id: str, link: IncidentLink, linked_at: datetime
+    ) -> dict[str, Any]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM raw_reports WHERE id = %s AND organization_id = %s AND workspace_id = %s",
+                (report_id, context.tenant_id, context.workspace_id),
+            )
+            if cursor.fetchone() is None:
+                raise ReportNotFoundError
+            cursor.execute(
+                "SELECT 1 FROM synthetic_incidents WHERE id = %s AND organization_id = %s AND workspace_id = %s",
+                (link.incident_id, context.tenant_id, context.workspace_id),
+            )
+            if cursor.fetchone() is None:
+                raise IncidentNotFoundError
+            cursor.execute(
+                "INSERT INTO report_incident_links (report_id, incident_id, organization_id, workspace_id, linked_by, linked_at) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                (
+                    report_id,
+                    link.incident_id,
+                    context.tenant_id,
+                    context.workspace_id,
+                    context.actor_id,
+                    linked_at,
+                ),
+            )
+        return {
+            "report_id": report_id,
+            "incident_id": link.incident_id,
+            "linked_by": context.actor_id,
+            "linked_at": _utc_iso(linked_at),
+        }
+
+    def list_incidents(self, context: RequestContext) -> list[dict[str, Any]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, title, need_type, verification_state, location_geojson, source, observed_at FROM synthetic_incidents WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at, id",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "title": row[1],
+                    "need_type": row[2],
+                    "verification_state": row[3],
+                    "location": row[4],
+                    "source": row[5],
+                    "observed_at": _utc_iso(row[6]),
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def list_sectors(self, context: RequestContext) -> list[dict[str, Any]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, name, ST_AsGeoJSON(geometry)::jsonb, assessment_state, assessment_source, assessed_at FROM sectors WHERE organization_id = %s AND workspace_id = %s ORDER BY id",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "name": row[1],
+                    "geometry": row[2],
+                    "assessment_state": row[3],
+                    "assessment_source": row[4],
+                    "assessed_at": _utc_iso(row[5]),
+                }
+                for row in cursor.fetchall()
+            ]
 
     @staticmethod
     def _envelope(
@@ -447,12 +725,13 @@ class PostgreSQLEvidenceStore:
     def create_report(
         self, context: RequestContext, report: ReportCreate, recorded_at: datetime
     ) -> tuple[dict[str, Any], bool]:
-        payload = report.model_dump(mode="json")
+        payload = report.model_dump(mode="json", exclude_unset=True)
         digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
         normalized = normalize_report(report)
         report_id = _opaque_id("rpt")
         with self._connection() as connection:
             with connection.cursor() as cursor:
+                self._ensure_context(cursor, context, recorded_at)
                 cursor.execute(
                     "SELECT id, original_sha256 FROM raw_reports WHERE organization_id = %s AND workspace_id = %s AND client_record_id = %s",
                     (context.tenant_id, context.workspace_id, report.client_record_id),
@@ -530,6 +809,30 @@ class PostgreSQLEvidenceStore:
                             recorded_at,
                         ),
                     )
+                    cursor.execute(
+                        "SELECT id FROM raw_reports WHERE organization_id = %s AND workspace_id = %s AND report_type = %s AND id <> %s AND id IN (SELECT report_id FROM report_locations WHERE ST_DWithin(geometry, ST_SetSRID(ST_MakePoint(%s, %s), 4326), 0.001))",
+                        (
+                            context.tenant_id,
+                            context.workspace_id,
+                            report.report_type,
+                            report_id,
+                            longitude,
+                            latitude,
+                        ),
+                    )
+                    for (candidate_id,) in cursor.fetchall():
+                        cursor.execute(
+                            "INSERT INTO duplicate_candidates (id, organization_id, workspace_id, report_id, candidate_report_id, reason, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                            (
+                                _opaque_id("dup"),
+                                context.tenant_id,
+                                context.workspace_id,
+                                report_id,
+                                candidate_id,
+                                "same report type and nearby location",
+                                recorded_at,
+                            ),
+                        )
                 envelope = self._envelope(
                     context,
                     "report.accepted",
@@ -643,6 +946,14 @@ class PostgreSQLEvidenceStore:
                     (report_id,),
                 )
                 normalization = cursor.fetchone()
+                cursor.execute(
+                    "SELECT candidate_report_id, reason FROM duplicate_candidates WHERE report_id = %s ORDER BY created_at, id",
+                    (report_id,),
+                )
+                duplicate_candidates = [
+                    {"candidate_report_id": item[0], "reason": item[1]}
+                    for item in cursor.fetchall()
+                ]
         return {
             "id": row[0],
             "tenant_id": context.tenant_id,
@@ -672,6 +983,7 @@ class PostgreSQLEvidenceStore:
             if normalization
             else None,
             "claims": claims,
+            "duplicate_candidates": duplicate_candidates,
         }
 
     def seed_demo(self, context: RequestContext, recorded_at: datetime) -> int:
@@ -701,6 +1013,24 @@ class PostgreSQLEvidenceStore:
         created = 0
         with self._connection() as connection:
             with connection.cursor() as cursor:
+                self._ensure_context(cursor, context, recorded_at)
+                for sector_id, name, state, longitude, latitude in [
+                    ("sector_demo_north", "North Sector", "assessed", 91.73, 26.18),
+                    ("sector_demo_east", "East Sector", "unassessed", 91.75, 26.19),
+                    ("sector_demo_west", "West Sector", "inaccessible", 91.72, 26.17),
+                ]:
+                    cursor.execute(
+                        "INSERT INTO sectors (id, organization_id, workspace_id, name, geometry, assessment_state, assessment_source, assessed_at) VALUES (%s, %s, %s, %s, ST_SetSRID(ST_MakePolygon(ST_GeomFromText(%s)), 4326), %s, 'synthetic_demo_seed', %s) ON CONFLICT (id) DO NOTHING",
+                        (
+                            sector_id,
+                            context.tenant_id,
+                            context.workspace_id,
+                            name,
+                            f"LINESTRING({longitude - 0.01} {latitude - 0.01}, {longitude + 0.01} {latitude - 0.01}, {longitude + 0.01} {latitude + 0.01}, {longitude - 0.01} {latitude + 0.01}, {longitude - 0.01} {latitude - 0.01})",
+                            state,
+                            recorded_at if state == "assessed" else None,
+                        ),
+                    )
                 for incident_id, title, need_type, state, coordinates in seeds:
                     cursor.execute(
                         "INSERT INTO synthetic_incidents (id, organization_id, workspace_id, title, need_type, verification_state, location_geojson, source, observed_at, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
@@ -718,6 +1048,17 @@ class PostgreSQLEvidenceStore:
                         ),
                     )
                     created += cursor.rowcount
+                    cursor.execute(
+                        "INSERT INTO incident_locations (incident_id, organization_id, workspace_id, geometry, created_at) VALUES (%s, %s, %s, ST_SetSRID(ST_MakePoint(%s, %s), 4326), %s) ON CONFLICT (incident_id) DO NOTHING",
+                        (
+                            incident_id,
+                            context.tenant_id,
+                            context.workspace_id,
+                            coordinates[0],
+                            coordinates[1],
+                            recorded_at,
+                        ),
+                    )
         return created
 
     def map_features(
@@ -726,8 +1067,13 @@ class PostgreSQLEvidenceStore:
         with self._connection() as connection:
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT id, title, need_type, verification_state, location_geojson, source, observed_at FROM synthetic_incidents WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at, id LIMIT 100",
-                    (context.tenant_id, context.workspace_id),
+                    "SELECT i.id, i.title, i.need_type, i.verification_state, i.location_geojson, i.source, i.observed_at FROM synthetic_incidents i JOIN incident_locations l ON l.incident_id = i.id WHERE i.organization_id = %s AND i.workspace_id = %s AND (%s OR ST_Intersects(l.geometry, ST_MakeEnvelope(%s, %s, %s, %s, 4326))) ORDER BY i.created_at, i.id LIMIT 100",
+                    (
+                        context.tenant_id,
+                        context.workspace_id,
+                        bbox is None,
+                        *(bbox or (0, 0, 0, 0)),
+                    ),
                 )
                 incidents = [
                     {
@@ -742,8 +1088,13 @@ class PostgreSQLEvidenceStore:
                     for row in cursor.fetchall()
                 ]
                 cursor.execute(
-                    "SELECT id, report_type, status, source, observed_at, recorded_at, location_geojson, location_uncertainty_m FROM raw_reports WHERE organization_id = %s AND workspace_id = %s ORDER BY recorded_at DESC, id DESC LIMIT 100",
-                    (context.tenant_id, context.workspace_id),
+                    "SELECT r.id, r.report_type, r.status, r.source, r.observed_at, r.recorded_at, r.location_geojson, r.location_uncertainty_m FROM raw_reports r LEFT JOIN report_locations l ON l.report_id = r.id WHERE r.organization_id = %s AND r.workspace_id = %s AND (%s OR ST_Intersects(l.geometry, ST_MakeEnvelope(%s, %s, %s, %s, 4326))) ORDER BY r.recorded_at DESC, r.id DESC LIMIT 100",
+                    (
+                        context.tenant_id,
+                        context.workspace_id,
+                        bbox is None,
+                        *(bbox or (0, 0, 0, 0)),
+                    ),
                 )
                 reports = [
                     {
@@ -759,4 +1110,24 @@ class PostgreSQLEvidenceStore:
                     }
                     for row in cursor.fetchall()
                 ]
-        return _feature_collection(incidents, reports, limit, bbox)
+                cursor.execute(
+                    "SELECT id, name, ST_AsGeoJSON(geometry)::jsonb, assessment_state, assessment_source, assessed_at FROM sectors WHERE organization_id = %s AND workspace_id = %s AND (%s OR ST_Intersects(geometry, ST_MakeEnvelope(%s, %s, %s, %s, 4326))) ORDER BY id",
+                    (
+                        context.tenant_id,
+                        context.workspace_id,
+                        bbox is None,
+                        *(bbox or (0, 0, 0, 0)),
+                    ),
+                )
+                sectors = [
+                    {
+                        "id": row[0],
+                        "name": row[1],
+                        "geometry": row[2],
+                        "assessment_state": row[3],
+                        "assessment_source": row[4],
+                        "assessed_at": _utc_iso(row[5]),
+                    }
+                    for row in cursor.fetchall()
+                ]
+        return _feature_collection(incidents, reports, limit, bbox, sectors)

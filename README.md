@@ -1,6 +1,6 @@
 # D.R.I.S.H.T.I - Disaster Response Intelligence System for Human Triage Intelligence
 
-Phase 1 provides a deliberately thin foundation for the district disaster evidence and resource decision-support demo. It includes a FastAPI boundary, a React shell, executable API contracts, a development-only identity fixture, and a PostgreSQL/PostGIS foundation migration. It does not implement reports, resources, recommendations, or tasking.
+The repository is a deliberately bounded district disaster evidence and resource decision-support demo. It includes a FastAPI boundary, React shell, executable API contracts, development-only identity fixtures, PostgreSQL/PostGIS-backed evidence/operations/decision paths, and synthetic data. Production identity, external integrations, offline sync, and object storage remain out of scope.
 
 ## Prerequisites
 
@@ -63,5 +63,5 @@ Then open `http://127.0.0.1:5173` and use the evidence workbench. The 3–5 minu
 - Development identity is deterministic, deny-by-default, and rejected in production configuration.
 - Correlation IDs and errors use one shared boundary implementation.
 - Event time remains distinct from server-recorded time.
-- The initial migration creates only organization/workspace metadata and the audit, outbox, idempotency, and job primitives required by later phases.
+- Forward-only migrations create organization/workspace metadata, evidence, spatial state, audit/outbox/idempotency primitives, operations, and decision snapshots.
 - Object storage, real OIDC, and all disaster-domain workflows remain later checkpoints.

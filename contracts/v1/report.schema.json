@@ -50,6 +50,20 @@
     },
     "report_type": { "type": "string", "minLength": 1, "maxLength": 64 },
     "facts": { "type": "object" },
+    "attachments": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["media_type", "byte_size", "sha256"],
+        "properties": {
+          "media_type": { "enum": ["image/jpeg", "image/png", "application/pdf", "text/plain"] },
+          "byte_size": { "type": "integer", "minimum": 1, "maximum": 5000000 },
+          "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" }
+        }
+      }
+    },
     "privacy_class": { "enum": ["restricted_operational", "internal"] }
   }
 }
