@@ -24,6 +24,7 @@ from app.operations import (
     TaskApproval,
     TaskConflictError,
     TaskNotFoundError,
+    TaskOutcome,
     TaskStatusUpdate,
 )
 from app.persistence import database_ready
@@ -471,6 +472,38 @@ async def update_task(
     except TaskConflictError as exc:
         raise ApiProblem(
             status=409, code="TASK_CONFLICT", title="Task state conflict", detail=str(exc)
+        ) from None
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
+
+
+@router.post("/tasks/{task_id}/outcome", tags=["operations"], response_model=None)
+async def record_task_outcome(
+    request: Request,
+    task_id: str,
+    outcome: TaskOutcome,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.operations_store.record_task_outcome(
+            context, task_id, outcome, request.app.state.clock.now(), idempotency_key
+        )
+    except TaskNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="TASK_NOT_FOUND",
+            title="Task not found",
+            detail="The task is outside the current scope.",
+        ) from None
+    except TaskConflictError as exc:
+        raise ApiProblem(
+            status=409, code="TASK_CONFLICT", title="Task outcome conflict", detail=str(exc)
         ) from None
     except IdempotencyConflictError:
         raise ApiProblem(

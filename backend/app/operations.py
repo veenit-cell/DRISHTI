@@ -35,6 +35,10 @@ class QueueItemCreate(BaseModel):
     notes: str | None = Field(default=None, max_length=500)
     queue_type: str = Field(default="response", pattern="^(response|verification)$")
     required_capability: str | None = Field(default=None, max_length=80)
+    owner_actor_id: str | None = Field(default=None, max_length=128)
+    due_at: datetime | None = None
+    source_report_id: str | None = Field(default=None, max_length=128)
+    source_incident_id: str | None = Field(default=None, max_length=128)
 
 
 class ResourceReadinessUpdate(BaseModel):
@@ -63,6 +67,11 @@ class TaskStatusUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: str = Field(pattern="^(assigned|acknowledged|en_route|completed)$")
+
+
+class TaskOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: str = Field(min_length=1, max_length=1000)
 
 
 class ResourceNotFoundError(Exception):
@@ -135,6 +144,14 @@ class OperationsStore(Protocol):
     ) -> dict[str, Any]: ...
 
     def list_tasks(self, context: RequestContext) -> list[dict[str, Any]]: ...
+    def record_task_outcome(
+        self,
+        context: RequestContext,
+        task_id: str,
+        outcome: TaskOutcome,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
     def list_jobs(self, context: RequestContext) -> list[dict[str, Any]]: ...
 
     def reset_for_replay(self, context: RequestContext, now: datetime) -> None: ...
@@ -406,6 +423,24 @@ class InMemoryOperationsStore:
             for task in self.tasks.values()
             if task["workspace_id"] == context.workspace_id
         ]
+
+    def record_task_outcome(self, context, task_id, outcome, now, idempotency_key):
+        payload = {
+            "operation": "task.outcome.v1",
+            "task_id": task_id,
+            "outcome": outcome.model_dump(),
+        }
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
+        task = self.tasks.get(task_id)
+        if task is None or task["workspace_id"] != context.workspace_id:
+            raise TaskNotFoundError
+        if task["status"] != "completed":
+            raise TaskConflictError("task outcome requires completion")
+        task["outcome_summary"] = outcome.summary
+        task["outcome_recorded_at"] = now.isoformat()
+        return self._replay_or_record(context, idempotency_key, payload, dict(task))
 
     def list_jobs(self, context):
         return []
@@ -682,7 +717,7 @@ class PostgreSQLOperationsStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "INSERT INTO response_queue_items (organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s) RETURNING id, title, priority, destination, notes, queue_type, required_capability, status, created_at",
+                "INSERT INTO response_queue_items (organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s) RETURNING id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, status, created_at",
                 (
                     context.tenant_id,
                     context.workspace_id,
@@ -692,6 +727,10 @@ class PostgreSQLOperationsStore:
                     item.notes,
                     item.queue_type,
                     item.required_capability,
+                    item.owner_actor_id,
+                    item.due_at,
+                    item.source_report_id,
+                    item.source_incident_id,
                     now,
                 ),
             )
@@ -704,8 +743,12 @@ class PostgreSQLOperationsStore:
                 "notes": row[4],
                 "queue_type": row[5],
                 "required_capability": row[6],
-                "status": row[7],
-                "created_at": _iso(row[8]),
+                "owner_actor_id": row[7],
+                "due_at": _iso(row[8]),
+                "source_report_id": row[9],
+                "source_incident_id": row[10],
+                "status": row[11],
+                "created_at": _iso(row[12]),
             }
             self._audit(
                 cursor,
@@ -724,7 +767,7 @@ class PostgreSQLOperationsStore:
     ) -> list[dict[str, Any]]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT id, title, priority, destination, notes, queue_type, required_capability, status, created_at FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s AND queue_type = %s ORDER BY created_at, id",
+                "SELECT id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, status, created_at FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s AND queue_type = %s ORDER BY created_at, id",
                 (context.tenant_id, context.workspace_id, queue_type),
             )
             return [
@@ -736,8 +779,12 @@ class PostgreSQLOperationsStore:
                     "notes": row[4],
                     "queue_type": row[5],
                     "required_capability": row[6],
-                    "status": row[7],
-                    "created_at": _iso(row[8]),
+                    "owner_actor_id": row[7],
+                    "due_at": _iso(row[8]),
+                    "source_report_id": row[9],
+                    "source_incident_id": row[10],
+                    "status": row[11],
+                    "created_at": _iso(row[12]),
                 }
                 for row in cursor.fetchall()
             ]
@@ -947,6 +994,44 @@ class PostgreSQLOperationsStore:
                 (context.tenant_id, context.workspace_id),
             )
             return [_task_record(row) for row in cursor.fetchall()]
+
+    def record_task_outcome(self, context, task_id, outcome, now, idempotency_key):
+        payload = {
+            "operation": "task.outcome.v1",
+            "task_id": task_id,
+            "outcome": outcome.model_dump(),
+        }
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "SELECT queue_item_id, status FROM response_tasks WHERE id=%s AND organization_id=%s AND workspace_id=%s FOR UPDATE",
+                (task_id, context.tenant_id, context.workspace_id),
+            )
+            task = cursor.fetchone()
+            if task is None:
+                raise TaskNotFoundError
+            if task[1] != "completed":
+                raise TaskConflictError("task outcome requires completion")
+            cursor.execute(
+                "UPDATE response_tasks SET outcome_summary=%s, outcome_recorded_at=%s WHERE id=%s",
+                (outcome.summary, now, task_id),
+            )
+            cursor.execute(
+                "UPDATE recommendations SET outcome_summary=%s, outcome_at=%s WHERE organization_id=%s AND workspace_id=%s AND queue_item_id=%s",
+                (outcome.summary, now, context.tenant_id, context.workspace_id, task[0]),
+            )
+            response = {
+                "task_id": task_id,
+                "queue_item_id": str(task[0]),
+                "outcome_summary": outcome.summary,
+                "outcome_recorded_at": now.isoformat(),
+            }
+            self._audit(cursor, context, "task.outcome_recorded", "task", task_id, response, now)
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
 
     def list_jobs(self, context):
         with self._connection() as connection, connection.cursor() as cursor:

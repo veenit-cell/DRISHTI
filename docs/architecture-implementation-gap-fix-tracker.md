@@ -12,6 +12,10 @@ Updated: 30 August 2026
 
 Remaining: direct evidence/incident IDs in recommendation inputs, full field outcomes, alternatives/exclusions, expiry enforcement, and operator UI.
 
+## Operational-loop update
+
+Queue items now accept owner, deadline, report/incident source IDs. Completed tasks accept an idempotent outcome; the PostgreSQL adapter records it on the linked recommendation and emits an audit event. Remaining: source-ID validation against the evidence store, field task UX, and richer outcomes.
+
 ## First-half pass (architecture commitments 1–9)
 
 Recommendation expiry is now enforced in both adapters (four-hour synthetic horizon). The first half remains demo-complete but not production-complete: aggregate revisions, cross-module atomic replay reset, full evidence references, spatial coverage, capacity modeling, alternatives/exclusions, and field outcomes remain open.

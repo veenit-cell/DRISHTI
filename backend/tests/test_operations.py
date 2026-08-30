@@ -60,6 +60,12 @@ def test_tasking_requires_approval_and_prevents_double_booking() -> None:
             ).status_code
             == 200
         )
+    outcome = client.post(
+        f"/api/v1/tasks/{first.json()['id']}/outcome",
+        headers=headers("outcome-001"),
+        json={"summary": "Synthetic water delivery completed"},
+    )
+    assert outcome.status_code == 200 and outcome.json()["outcome_summary"]
     assert (
         client.post(
             f"/api/v1/response-queue/{q2['id']}/approve",
