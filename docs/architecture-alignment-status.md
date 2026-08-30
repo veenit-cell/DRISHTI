@@ -124,6 +124,18 @@ Verification update: `pytest backend/tests -q` = **60 passed**; `npm --prefix fr
 
 Limitations: this is not offline synchronization, GPS tracking, mesh networking, background upload, or shell-cache authority. Conflicted items remain client-side until an in-order command resolves them; server reconciliation is authoritative.
 
+## `security-boundary`
+
+**Status:** Hardened development/test identity boundary with an OIDC-compatible seam and bounded request protection.
+
+- `backend/app/core/context.py` centralizes role, organization, workspace/event, and scope resolution. `OIDCVerifier` is the provider seam; `LocalOIDCVerifier` accepts only deterministic `local:<identity>[:expiry]` test tokens. Development identity is rejected in production by `Settings` validation.
+- `IdentityRateLimitMiddleware` applies a one-process per-identity fixed-window limit and returns a consistent problem response. Request logs contain method/path/timing only; no credentials or identity tokens are logged. Pydantic `extra=forbid` contracts reject mass assignment.
+- `backend/migrations/0013_security_rls.sql` adds tenant/workspace RLS policies for operational tables using transaction-local settings while retaining application predicates.
+
+Verification update: security tests cover missing/invalid/expired identity, role denial, production refusal, and rate limiting; full suite = **62 passed**; Ruff and diff check passed.
+
+Limitations: no external OIDC provider or secrets are configured. RLS policies are not enabled by this migration until API transactions set `app.tenant_id` and `app.workspace_id`; direct database isolation therefore remains a deployment task, not a production claim.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

@@ -5,7 +5,11 @@ from app.api.routes import router
 from app.core.clock import Clock, SystemClock
 from app.core.config import Settings, get_settings
 from app.core.errors import install_problem_handlers
-from app.core.middleware import CorrelationIdMiddleware, RequestGuardMiddleware
+from app.core.middleware import (
+    CorrelationIdMiddleware,
+    IdentityRateLimitMiddleware,
+    RequestGuardMiddleware,
+)
 from app.decision_loop import InMemoryDecisionStore, PostgreSQLDecisionStore
 from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
 from app.offline_sync import OfflineSyncStore
@@ -56,6 +60,11 @@ def create_app(
             "X-Correlation-ID",
             "X-Dev-Identity",
         ],
+    )
+    app.add_middleware(
+        IdentityRateLimitMiddleware,
+        limit=60,
+        window_seconds=60,
     )
     app.add_middleware(
         RequestGuardMiddleware,

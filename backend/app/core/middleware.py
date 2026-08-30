@@ -1,3 +1,6 @@
+"""Request safety middleware."""
+# ruff: noqa: E501
+
 import json
 import logging
 import re
@@ -104,3 +107,27 @@ class RequestGuardMiddleware:
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
             },
         )
+
+
+class IdentityRateLimitMiddleware:
+    """Small one-process fixed-window limiter; identity values are never logged."""
+
+    def __init__(self, app: ASGIApp, limit: int = 60, window_seconds: int = 60) -> None:
+        self.app, self.limit, self.window_seconds = app, limit, window_seconds
+        self._counters: dict[tuple[str, int], int] = {}
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = dict(scope.get("headers", []))
+        identity = headers.get(b"x-dev-identity", b"bearer" ).decode("ascii", errors="ignore") or "anonymous"
+        bucket = int(time.time() // self.window_seconds)
+        key = (identity, bucket)
+        self._counters[key] = self._counters.get(key, 0) + 1
+        if self._counters[key] > self.limit:
+            body = json.dumps({"code": "RATE_LIMITED", "detail": "Request limit exceeded; retry shortly."}).encode()
+            await send({"type": "http.response.start", "status": 429, "headers": [(b"content-type", b"application/problem+json"), (b"content-length", str(len(body)).encode())]})
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
