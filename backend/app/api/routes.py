@@ -8,6 +8,7 @@ from app.core.errors import ApiProblem, Problem, problem_response
 from app.decision_loop import DecisionNotFoundError, DecisionResponse
 from app.evidence import ReportConflictError, ReportCreate, ReportNotFoundError
 from app.operations import (
+    IdempotencyConflictError,
     QueueItemCreate,
     QueueItemNotFoundError,
     ResourceNotFoundError,
@@ -193,11 +194,22 @@ async def map_features(
 async def seed_operations(
     request: Request,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
-    return {
-        "synthetic": True,
-        **request.app.state.operations_store.seed_demo(context, request.app.state.clock.now()),
-    }
+    try:
+        return {
+            "synthetic": True,
+            **request.app.state.operations_store.seed_demo(
+                context, request.app.state.clock.now(), idempotency_key
+            ),
+        }
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
 
 
 @router.get("/resources", tags=["operations"], response_model=None)
@@ -212,10 +224,19 @@ async def create_response_queue(
     request: Request,
     item: QueueItemCreate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
-    return request.app.state.operations_store.create_queue(
-        context, item, request.app.state.clock.now()
-    )
+    try:
+        return request.app.state.operations_store.create_queue(
+            context, item, request.app.state.clock.now(), idempotency_key
+        )
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
 
 
 @router.get("/response-queue", tags=["operations"], response_model=None)
@@ -231,10 +252,11 @@ async def approve_task(
     queue_id: str,
     approval: TaskApproval,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
     try:
         return request.app.state.operations_store.approve_task(
-            context, queue_id, approval, request.app.state.clock.now()
+            context, queue_id, approval, request.app.state.clock.now(), idempotency_key
         )
     except QueueItemNotFoundError:
         raise ApiProblem(
@@ -254,6 +276,13 @@ async def approve_task(
         raise ApiProblem(
             status=409, code="TASK_CONFLICT", title="Task cannot be approved", detail=str(exc)
         ) from None
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
 
 
 @router.get("/tasks", tags=["operations"], response_model=None)
@@ -269,10 +298,11 @@ async def update_task(
     task_id: str,
     update: TaskStatusUpdate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
     try:
         return request.app.state.operations_store.update_task(
-            context, task_id, update.status, request.app.state.clock.now()
+            context, task_id, update.status, request.app.state.clock.now(), idempotency_key
         )
     except TaskNotFoundError:
         raise ApiProblem(
@@ -281,13 +311,36 @@ async def update_task(
             title="Task not found",
             detail="The task is outside the current scope.",
         ) from None
+    except TaskConflictError as exc:
+        raise ApiProblem(
+            status=409, code="TASK_CONFLICT", title="Task state conflict", detail=str(exc)
+        ) from None
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
 
 
 @router.post("/decision-loop/demo/replay", tags=["decision-loop"], response_model=None)
 async def replay_decision_demo(
-    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:write"))]
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
-    return request.app.state.decision_store.replay(context, request.app.state.clock.now())
+    try:
+        return request.app.state.decision_store.replay(
+            context, request.app.state.clock.now(), idempotency_key
+        )
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
 
 
 @router.get("/decision-loop/scenario", tags=["decision-loop"], response_model=None)
@@ -299,9 +352,21 @@ async def get_decision_scenario(
 
 @router.post("/decision-loop/recommendations", tags=["decision-loop"], response_model=None)
 async def create_recommendation(
-    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:write"))]
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
-    return request.app.state.decision_store.recommend(context, request.app.state.clock.now())
+    try:
+        return request.app.state.decision_store.recommend(
+            context, request.app.state.clock.now(), idempotency_key
+        )
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
 
 
 @router.post(
@@ -314,10 +379,11 @@ async def decide_recommendation(
     recommendation_id: str,
     response: DecisionResponse,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
     try:
         return request.app.state.decision_store.decide(
-            context, recommendation_id, response, request.app.state.clock.now()
+            context, recommendation_id, response, request.app.state.clock.now(), idempotency_key
         )
     except DecisionNotFoundError:
         raise ApiProblem(
@@ -325,6 +391,13 @@ async def decide_recommendation(
             code="RECOMMENDATION_NOT_FOUND",
             title="Recommendation not found",
             detail="The recommendation is outside the current scope.",
+        ) from None
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
         ) from None
 
 

@@ -6,15 +6,15 @@ from app.core.clock import Clock, SystemClock
 from app.core.config import Settings, get_settings
 from app.core.errors import install_problem_handlers
 from app.core.middleware import CorrelationIdMiddleware
-from app.decision_loop import InMemoryDecisionStore
+from app.decision_loop import InMemoryDecisionStore, PostgreSQLDecisionStore
 from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
-from app.operations import InMemoryOperationsStore
+from app.operations import InMemoryOperationsStore, OperationsStore, PostgreSQLOperationsStore
 
 
 def create_app(
     settings: Settings | None = None,
     evidence_store: EvidenceStore | None = None,
-    operations_store: InMemoryOperationsStore | None = None,
+    operations_store: OperationsStore | None = None,
     clock: Clock | None = None,
 ) -> FastAPI:
     resolved_settings = settings or get_settings()
@@ -29,8 +29,15 @@ def create_app(
     app.state.evidence_store = evidence_store or PostgreSQLEvidenceStore(
         resolved_settings.database_url
     )
-    app.state.operations_store = operations_store or InMemoryOperationsStore()
-    app.state.decision_store = InMemoryDecisionStore(app.state.operations_store)
+    resolved_operations_store = operations_store or PostgreSQLOperationsStore(
+        resolved_settings.database_url
+    )
+    app.state.operations_store = resolved_operations_store
+    app.state.decision_store = (
+        InMemoryDecisionStore(resolved_operations_store)
+        if isinstance(resolved_operations_store, InMemoryOperationsStore)
+        else PostgreSQLDecisionStore(resolved_settings.database_url, resolved_operations_store)
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[str(origin) for origin in resolved_settings.allowed_origins],

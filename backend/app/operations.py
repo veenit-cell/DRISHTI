@@ -1,7 +1,14 @@
+# ruff: noqa: E501
+
+import copy
+import hashlib
+import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
+import psycopg
+from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.context import RequestContext
@@ -55,23 +62,113 @@ class TaskNotFoundError(Exception):
     pass
 
 
+class IdempotencyConflictError(Exception):
+    pass
+
+
+class OperationsStore(Protocol):
+    def seed_demo(
+        self, context: RequestContext, now: datetime, idempotency_key: str
+    ) -> dict[str, int]: ...
+
+    def list_resources(self, context: RequestContext) -> list[dict[str, Any]]: ...
+
+    def create_queue(
+        self, context: RequestContext, item: QueueItemCreate, now: datetime, idempotency_key: str
+    ) -> dict[str, Any]: ...
+
+    def list_queue(self, context: RequestContext) -> list[dict[str, Any]]: ...
+
+    def approve_task(
+        self,
+        context: RequestContext,
+        queue_id: str,
+        approval: TaskApproval,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def update_task(
+        self,
+        context: RequestContext,
+        task_id: str,
+        status: str,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+
+    def list_tasks(self, context: RequestContext) -> list[dict[str, Any]]: ...
+
+    def reset_for_replay(self, context: RequestContext, now: datetime) -> None: ...
+
+
+def _opaque_id(prefix: str) -> str:
+    return f"{prefix}_{uuid4().hex}"
+
+
+def _request_hash(value: Any) -> str:
+    canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _task_record(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": str(row[0]),
+        "queue_item_id": str(row[1]),
+        "resource_id": str(row[2]),
+        "status": row[3],
+        "approved": True,
+        "approved_by": row[4],
+        "approved_at": _iso(row[5]),
+        "updated_at": _iso(row[6]),
+    }
+
+
 class InMemoryOperationsStore:
+    """Fast deterministic test adapter. Application runtime uses PostgreSQLOperationsStore."""
+
     def __init__(self) -> None:
         self.resources: dict[str, dict[str, Any]] = {}
         self.queue: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
+        self._idempotent: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
 
-    def seed_demo(self, context: RequestContext, now: datetime) -> dict[str, int]:
+    def _replay_or_record(
+        self, context: RequestContext, key: str, payload: Any, result: dict[str, Any]
+    ) -> dict[str, Any]:
+        identity = (context.tenant_id, context.workspace_id, key)
+        digest = _request_hash(payload)
+        existing = self._idempotent.get(identity)
+        if existing:
+            if existing[0] != digest:
+                raise IdempotencyConflictError
+            return copy.deepcopy(existing[1])
+        self._idempotent[identity] = (digest, copy.deepcopy(result))
+        return result
+
+    def seed_demo(
+        self, context: RequestContext, now: datetime, idempotency_key: str
+    ) -> dict[str, int]:
+        payload = {"operation": "operations.seed.v1"}
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
         if any(r["workspace_id"] == context.workspace_id for r in self.resources.values()):
-            return {"resources": 0, "queue_items": 0}
+            return self._replay_or_record(
+                context, idempotency_key, payload, {"resources": 0, "queue_items": 0}
+            )
         for name, typ, readiness, location in [
             ("Synthetic Water Team Alpha", "water_team", "ready", "North Sector"),
             ("Synthetic Generator Unit", "power_unit", "ready", "Central Shelter"),
             ("Synthetic Medical Van", "medical_transport", "not_ready", "East Depot"),
         ]:
-            rid = f"res_{uuid4().hex[:12]}"
-            self.resources[rid] = {
-                "id": rid,
+            resource_id = _opaque_id("res")
+            self.resources[resource_id] = {
+                "id": resource_id,
                 "name": name,
                 "resource_type": typ,
                 "readiness": readiness,
@@ -79,7 +176,9 @@ class InMemoryOperationsStore:
                 "workspace_id": context.workspace_id,
                 "created_at": now.isoformat(),
             }
-        return {"resources": 3, "queue_items": 0}
+        return self._replay_or_record(
+            context, idempotency_key, payload, {"resources": 3, "queue_items": 0}
+        )
 
     def list_resources(self, context: RequestContext) -> list[dict[str, Any]]:
         return [
@@ -87,25 +186,46 @@ class InMemoryOperationsStore:
         ]
 
     def create_queue(
-        self, context: RequestContext, item: QueueItemCreate, now: datetime
+        self, context: RequestContext, item: QueueItemCreate, now: datetime, idempotency_key: str
     ) -> dict[str, Any]:
-        iid = f"q_{uuid4().hex[:12]}"
+        payload = {"operation": "response_queue.create.v1", "item": item.model_dump(mode="json")}
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
+        item_id = _opaque_id("q")
         record = {
-            "id": iid,
+            "id": item_id,
             **item.model_dump(),
             "status": "queued",
             "workspace_id": context.workspace_id,
             "created_at": now.isoformat(),
         }
-        self.queue[iid] = record
-        return dict(record)
+        self.queue[item_id] = record
+        return self._replay_or_record(context, idempotency_key, payload, dict(record))
 
     def list_queue(self, context: RequestContext) -> list[dict[str, Any]]:
-        return [dict(i) for i in self.queue.values() if i["workspace_id"] == context.workspace_id]
+        return [
+            dict(item)
+            for item in self.queue.values()
+            if item["workspace_id"] == context.workspace_id
+        ]
 
     def approve_task(
-        self, context: RequestContext, queue_id: str, approval: TaskApproval, now: datetime
+        self,
+        context: RequestContext,
+        queue_id: str,
+        approval: TaskApproval,
+        now: datetime,
+        idempotency_key: str,
     ) -> dict[str, Any]:
+        payload = {
+            "operation": "response_queue.approve.v1",
+            "queue_id": queue_id,
+            "approval": approval.model_dump(mode="json"),
+        }
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
         item = self.queue.get(queue_id)
         resource = self.resources.get(approval.resource_id)
         if item is None or item["workspace_id"] != context.workspace_id:
@@ -114,17 +234,22 @@ class InMemoryOperationsStore:
             raise ResourceNotFoundError
         if not approval.approved:
             item["status"] = "rejected"
-            return {"approved": False, "queue_item_id": queue_id, "status": item["status"]}
+            return self._replay_or_record(
+                context,
+                idempotency_key,
+                payload,
+                {"approved": False, "queue_item_id": queue_id, "status": "rejected"},
+            )
         if resource["readiness"] != "ready":
             raise TaskConflictError("resource is not ready")
         if any(
-            t["resource_id"] == resource["id"] and t["status"] != "completed"
-            for t in self.tasks.values()
+            task["resource_id"] == resource["id"] and task["status"] != "completed"
+            for task in self.tasks.values()
         ):
             raise TaskConflictError("resource already has an active task")
-        tid = f"task_{uuid4().hex[:12]}"
+        task_id = _opaque_id("task")
         task = {
-            "id": tid,
+            "id": task_id,
             "queue_item_id": queue_id,
             "resource_id": resource["id"],
             "status": "assigned",
@@ -133,19 +258,432 @@ class InMemoryOperationsStore:
             "approved_at": now.isoformat(),
             "workspace_id": context.workspace_id,
         }
-        self.tasks[tid] = task
+        self.tasks[task_id] = task
         item["status"] = "assigned"
-        return dict(task)
+        return self._replay_or_record(context, idempotency_key, payload, dict(task))
 
     def update_task(
-        self, context: RequestContext, task_id: str, status: str, now: datetime
+        self,
+        context: RequestContext,
+        task_id: str,
+        status: str,
+        now: datetime,
+        idempotency_key: str,
     ) -> dict[str, Any]:
+        payload = {"operation": "task.update.v1", "task_id": task_id, "status": status}
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
         task = self.tasks.get(task_id)
         if task is None or task["workspace_id"] != context.workspace_id:
             raise TaskNotFoundError
+        transitions = {
+            "assigned": "acknowledged",
+            "acknowledged": "en_route",
+            "en_route": "completed",
+        }
+        if transitions.get(task["status"]) != status:
+            raise TaskConflictError(f"cannot change task from {task['status']} to {status}")
         task["status"] = status
         task["updated_at"] = now.isoformat()
-        return dict(task)
+        return self._replay_or_record(context, idempotency_key, payload, dict(task))
 
     def list_tasks(self, context: RequestContext) -> list[dict[str, Any]]:
-        return [dict(t) for t in self.tasks.values() if t["workspace_id"] == context.workspace_id]
+        return [
+            dict(task)
+            for task in self.tasks.values()
+            if task["workspace_id"] == context.workspace_id
+        ]
+
+    def reset_for_replay(self, context: RequestContext, now: datetime) -> None:
+        self.resources = {
+            key: value
+            for key, value in self.resources.items()
+            if value["workspace_id"] != context.workspace_id
+        }
+        self.queue = {
+            key: value
+            for key, value in self.queue.items()
+            if value["workspace_id"] != context.workspace_id
+        }
+        self.tasks = {
+            key: value
+            for key, value in self.tasks.items()
+            if value["workspace_id"] != context.workspace_id
+        }
+        self._idempotent = {
+            key: value for key, value in self._idempotent.items() if key[1] != context.workspace_id
+        }
+
+
+class PostgreSQLOperationsStore:
+    """Durable operations state. PostgreSQL owns all shared runtime state."""
+
+    def __init__(self, database_url: str) -> None:
+        self.database_url = database_url
+
+    def _connection(self) -> psycopg.Connection[Any]:
+        return psycopg.connect(self.database_url)
+
+    @staticmethod
+    def _ensure_context(cursor: Any, context: RequestContext, now: datetime) -> None:
+        cursor.execute(
+            "INSERT INTO organizations (id, name, created_at) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (context.tenant_id, "Development demo organization", now),
+        )
+        cursor.execute(
+            "INSERT INTO event_workspaces (id, organization_id, name, mode, status, event_time, created_at) VALUES (%s, %s, %s, 'replay', 'active', %s, %s) ON CONFLICT (id) DO NOTHING",
+            (context.workspace_id, context.tenant_id, "Development demo event", now, now),
+        )
+        cursor.execute(
+            "INSERT INTO memberships (organization_id, actor_id, role, created_at) VALUES (%s, %s, %s, %s) ON CONFLICT (organization_id, actor_id) DO NOTHING",
+            (context.tenant_id, context.actor_id, context.role, now),
+        )
+
+    @staticmethod
+    def _idempotent(
+        cursor: Any, context: RequestContext, key: str, payload: Any
+    ) -> dict[str, Any] | None:
+        digest = _request_hash(payload)
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(%s))",
+            (f"{context.tenant_id}:{context.workspace_id}:{key}",),
+        )
+        cursor.execute(
+            "SELECT request_hash, response_body FROM idempotency_records WHERE organization_id = %s AND workspace_id = %s AND idempotency_key = %s",
+            (context.tenant_id, context.workspace_id, key),
+        )
+        existing = cursor.fetchone()
+        if existing is None:
+            return None
+        if existing[0] != digest:
+            raise IdempotencyConflictError
+        return existing[1]
+
+    @staticmethod
+    def _record_idempotency(
+        cursor: Any,
+        context: RequestContext,
+        key: str,
+        payload: Any,
+        response: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        cursor.execute(
+            "INSERT INTO idempotency_records (organization_id, workspace_id, idempotency_key, request_hash, response_status, response_body, created_at, expires_at) VALUES (%s, %s, %s, %s, 200, %s, %s, %s)",
+            (
+                context.tenant_id,
+                context.workspace_id,
+                key,
+                _request_hash(payload),
+                Jsonb(response),
+                now,
+                now.replace(year=now.year + 1),
+            ),
+        )
+
+    @staticmethod
+    def _audit(
+        cursor: Any,
+        context: RequestContext,
+        action: str,
+        subject_type: str,
+        subject_id: str,
+        details: dict[str, Any],
+        now: datetime,
+    ) -> None:
+        cursor.execute(
+            "INSERT INTO audit_events (id, organization_id, workspace_id, actor_id, action, subject_type, subject_id, correlation_id, occurred_at, recorded_at, details) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                _opaque_id("evt"),
+                context.tenant_id,
+                context.workspace_id,
+                context.actor_id,
+                action,
+                subject_type,
+                subject_id,
+                context.correlation_id,
+                now,
+                now,
+                Jsonb(details),
+            ),
+        )
+
+    def seed_demo(
+        self, context: RequestContext, now: datetime, idempotency_key: str
+    ) -> dict[str, int]:
+        payload = {"operation": "operations.seed.v1"}
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "SELECT count(*) FROM resources WHERE organization_id = %s AND workspace_id = %s",
+                (context.tenant_id, context.workspace_id),
+            )
+            if cursor.fetchone()[0]:
+                response = {"resources": 0, "queue_items": 0}
+            else:
+                cursor.executemany(
+                    "INSERT INTO resources (organization_id, workspace_id, name, resource_type, readiness, location, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    [
+                        (
+                            context.tenant_id,
+                            context.workspace_id,
+                            name,
+                            resource_type,
+                            readiness,
+                            location,
+                            now,
+                        )
+                        for name, resource_type, readiness, location in [
+                            ("Synthetic Water Team Alpha", "water_team", "ready", "North Sector"),
+                            ("Synthetic Generator Unit", "power_unit", "ready", "Central Shelter"),
+                            (
+                                "Synthetic Medical Van",
+                                "medical_transport",
+                                "not_ready",
+                                "East Depot",
+                            ),
+                        ]
+                    ],
+                )
+                response = {"resources": 3, "queue_items": 0}
+            self._audit(
+                cursor,
+                context,
+                "operations.seeded",
+                "workspace",
+                context.workspace_id,
+                response,
+                now,
+            )
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
+
+    def list_resources(self, context: RequestContext) -> list[dict[str, Any]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, name, resource_type, readiness, location, created_at FROM resources WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at, id",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [
+                {
+                    "id": str(row[0]),
+                    "name": row[1],
+                    "resource_type": row[2],
+                    "readiness": row[3],
+                    "location": row[4],
+                    "created_at": _iso(row[5]),
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def create_queue(
+        self, context: RequestContext, item: QueueItemCreate, now: datetime, idempotency_key: str
+    ) -> dict[str, Any]:
+        payload = {"operation": "response_queue.create.v1", "item": item.model_dump(mode="json")}
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "INSERT INTO response_queue_items (organization_id, workspace_id, title, priority, destination, notes, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, 'queued', %s) RETURNING id, title, priority, destination, notes, status, created_at",
+                (
+                    context.tenant_id,
+                    context.workspace_id,
+                    item.title,
+                    item.priority,
+                    item.destination,
+                    item.notes,
+                    now,
+                ),
+            )
+            row = cursor.fetchone()
+            response = {
+                "id": str(row[0]),
+                "title": row[1],
+                "priority": row[2],
+                "destination": row[3],
+                "notes": row[4],
+                "status": row[5],
+                "created_at": _iso(row[6]),
+            }
+            self._audit(
+                cursor,
+                context,
+                "response_queue.created",
+                "queue_item",
+                response["id"],
+                {"priority": item.priority},
+                now,
+            )
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
+
+    def list_queue(self, context: RequestContext) -> list[dict[str, Any]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, title, priority, destination, notes, status, created_at FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at, id",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [
+                {
+                    "id": str(row[0]),
+                    "title": row[1],
+                    "priority": row[2],
+                    "destination": row[3],
+                    "notes": row[4],
+                    "status": row[5],
+                    "created_at": _iso(row[6]),
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def approve_task(
+        self,
+        context: RequestContext,
+        queue_id: str,
+        approval: TaskApproval,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        payload = {
+            "operation": "response_queue.approve.v1",
+            "queue_id": queue_id,
+            "approval": approval.model_dump(mode="json"),
+        }
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "SELECT id FROM response_queue_items WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
+                (queue_id, context.tenant_id, context.workspace_id),
+            )
+            if cursor.fetchone() is None:
+                raise QueueItemNotFoundError
+            cursor.execute(
+                "SELECT id, readiness FROM resources WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
+                (approval.resource_id, context.tenant_id, context.workspace_id),
+            )
+            resource = cursor.fetchone()
+            if resource is None:
+                raise ResourceNotFoundError
+            if not approval.approved:
+                cursor.execute(
+                    "UPDATE response_queue_items SET status = 'rejected' WHERE id = %s", (queue_id,)
+                )
+                response = {"approved": False, "queue_item_id": queue_id, "status": "rejected"}
+                self._audit(
+                    cursor,
+                    context,
+                    "task.rejected",
+                    "queue_item",
+                    queue_id,
+                    {"note": approval.approval_note},
+                    now,
+                )
+                self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+                return response
+            if resource[1] != "ready":
+                raise TaskConflictError("resource is not ready")
+            try:
+                cursor.execute(
+                    "INSERT INTO response_tasks (organization_id, workspace_id, queue_item_id, resource_id, status, approved_by, approved_at) VALUES (%s, %s, %s, %s, 'assigned', %s, %s) RETURNING id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at",
+                    (
+                        context.tenant_id,
+                        context.workspace_id,
+                        queue_id,
+                        approval.resource_id,
+                        context.actor_id,
+                        now,
+                    ),
+                )
+            except psycopg.errors.UniqueViolation:
+                raise TaskConflictError("resource already has an active task") from None
+            response = _task_record(cursor.fetchone())
+            cursor.execute(
+                "UPDATE response_queue_items SET status = 'assigned' WHERE id = %s", (queue_id,)
+            )
+            self._audit(
+                cursor,
+                context,
+                "task.approved",
+                "task",
+                response["id"],
+                {
+                    "queue_item_id": queue_id,
+                    "resource_id": approval.resource_id,
+                    "note": approval.approval_note,
+                },
+                now,
+            )
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
+
+    def update_task(
+        self,
+        context: RequestContext,
+        task_id: str,
+        status: str,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        payload = {"operation": "task.update.v1", "task_id": task_id, "status": status}
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "SELECT id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at FROM response_tasks WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
+                (task_id, context.tenant_id, context.workspace_id),
+            )
+            task = cursor.fetchone()
+            if task is None:
+                raise TaskNotFoundError
+            transitions = {
+                "assigned": "acknowledged",
+                "acknowledged": "en_route",
+                "en_route": "completed",
+            }
+            if transitions.get(task[3]) != status:
+                raise TaskConflictError(f"cannot change task from {task[3]} to {status}")
+            cursor.execute(
+                "UPDATE response_tasks SET status = %s, updated_at = %s WHERE id = %s RETURNING id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at",
+                (status, now, task_id),
+            )
+            response = _task_record(cursor.fetchone())
+            self._audit(
+                cursor, context, "task.status_updated", "task", task_id, {"status": status}, now
+            )
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
+
+    def list_tasks(self, context: RequestContext) -> list[dict[str, Any]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at FROM response_tasks WHERE organization_id = %s AND workspace_id = %s ORDER BY approved_at, id",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [_task_record(row) for row in cursor.fetchall()]
+
+    def reset_for_replay(self, context: RequestContext, now: datetime) -> None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            cursor.execute(
+                "DELETE FROM response_tasks WHERE organization_id = %s AND workspace_id = %s",
+                (context.tenant_id, context.workspace_id),
+            )
+            cursor.execute(
+                "DELETE FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s",
+                (context.tenant_id, context.workspace_id),
+            )
+            cursor.execute(
+                "DELETE FROM resources WHERE organization_id = %s AND workspace_id = %s",
+                (context.tenant_id, context.workspace_id),
+            )

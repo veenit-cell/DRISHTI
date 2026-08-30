@@ -3,9 +3,9 @@ requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ev2-backend"
+name = "drishti-backend"
 version = "0.1.0"
-description = "Phase 1 API foundation for EV2 district disaster decision support"
+description = "Phase 1 API foundation for D.R.I.S.H.T.I district disaster decision support"
 requires-python = ">=3.12,<3.14"
 dependencies = [
   "fastapi==0.116.1",

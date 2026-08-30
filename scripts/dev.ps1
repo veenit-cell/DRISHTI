@@ -3,6 +3,32 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $pythonPath = Join-Path $projectRoot '.venv\Scripts\python.exe'
 
+function Get-AvailableLoopbackPort {
+    param(
+        [int] $StartPort,
+        [int] $MaxAttempts = 20
+    )
+
+    for ($port = $StartPort; $port -lt ($StartPort + $MaxAttempts); $port++) {
+        $listener = [System.Net.Sockets.TcpListener]::new(
+            [System.Net.IPAddress]::Parse('127.0.0.1'),
+            $port
+        )
+        try {
+            $listener.Start()
+            return $port
+        }
+        catch [System.Net.Sockets.SocketException] {
+            continue
+        }
+        finally {
+            $listener.Stop()
+        }
+    }
+
+    throw "No available loopback port found from $StartPort to $($StartPort + $MaxAttempts - 1)."
+}
+
 if (-not (Test-Path -LiteralPath $pythonPath)) {
     throw 'Python environment missing. Run the one-time setup commands in README.md.'
 }
@@ -18,6 +44,9 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 Push-Location $projectRoot
 try {
     docker compose -f '.\infra\compose.yaml' up -d --wait database
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Compose database startup failed.'
+    }
 
     Push-Location '.\backend'
     try {
@@ -27,18 +56,20 @@ try {
         Pop-Location
     }
 
+    $frontendPort = Get-AvailableLoopbackPort -StartPort 5173
+
     $backend = Start-Process -FilePath $pythonPath `
         -ArgumentList '-m', 'uvicorn', 'app.main:app', '--host', '127.0.0.1', '--port', '8000' `
         -WorkingDirectory (Join-Path $projectRoot 'backend') `
         -WindowStyle Hidden `
         -PassThru
     $frontend = Start-Process -FilePath 'npm.cmd' `
-        -ArgumentList 'run', 'dev' `
+        -ArgumentList 'run', 'dev', '--', '--port', "$frontendPort" `
         -WorkingDirectory (Join-Path $projectRoot 'frontend') `
         -WindowStyle Hidden `
         -PassThru
 
-    Write-Output 'EV2 started: frontend http://127.0.0.1:5173 | API http://127.0.0.1:8000'
+    Write-Output "EV2 started: frontend http://127.0.0.1:$frontendPort | API http://127.0.0.1:8000"
     Write-Output 'Press Ctrl+C to stop the application processes.'
     try {
         while (-not $backend.HasExited -and -not $frontend.HasExited) {

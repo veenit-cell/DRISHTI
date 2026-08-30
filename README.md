@@ -24,7 +24,7 @@ npm.cmd --prefix .\frontend install
 .\scripts\dev.ps1
 ```
 
-The script starts the local PostGIS container, applies the foundation migration, then runs the API at `http://127.0.0.1:8000` and the frontend at `http://127.0.0.1:5173`. Press Ctrl+C to stop the application processes. The database container remains available for faster restarts.
+The script starts the local PostGIS container, applies the foundation migration, then runs the API at `http://127.0.0.1:8000` and the frontend at `http://127.0.0.1:5173`. If `5173` is already in use, it selects the next available frontend port and prints the actual URL. Press Ctrl+C to stop the application processes. The database container remains available for faster restarts.
 
 Health and version endpoints:
 
@@ -51,7 +51,7 @@ This runs backend formatting/lint checks, backend tests (including contract vali
 Start the local stack with `.\scripts\dev.ps1`. In a second PowerShell window, reset the fixed synthetic scenario:
 
 ```powershell
-$h = @{ 'X-Dev-Identity' = 'operator' }
+$h = @{ 'X-Dev-Identity' = 'operator'; 'Idempotency-Key' = 'demo-replay-001' }
 Invoke-RestMethod -Method Post -Headers $h http://127.0.0.1:8000/api/v1/decision-loop/demo/replay
 ```
 
