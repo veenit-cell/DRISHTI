@@ -3,7 +3,7 @@
 import copy
 import hashlib
 import json
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -21,6 +21,9 @@ class ResourceCreate(BaseModel):
     resource_type: str = Field(min_length=1, max_length=60)
     readiness: str = Field(pattern="^(ready|not_ready|unknown)$")
     location: str | None = Field(default=None, max_length=120)
+    capabilities: list[str] = Field(default_factory=list, max_length=20)
+    readiness_observed_at: datetime | None = None
+    readiness_expires_at: datetime | None = None
 
 
 class QueueItemCreate(BaseModel):
@@ -30,6 +33,22 @@ class QueueItemCreate(BaseModel):
     priority: str = Field(default="normal", pattern="^(low|normal|high|critical)$")
     destination: str | None = Field(default=None, max_length=120)
     notes: str | None = Field(default=None, max_length=500)
+    queue_type: str = Field(default="response", pattern="^(response|verification)$")
+    required_capability: str | None = Field(default=None, max_length=80)
+
+
+class ResourceReadinessUpdate(BaseModel):
+    readiness: str = Field(pattern="^(ready|not_ready|unknown)$")
+    observed_at: datetime
+    expires_at: datetime | None = None
+
+
+class RouteObservationCreate(BaseModel):
+    destination: str = Field(min_length=1, max_length=120)
+    state: str = Field(pattern="^(passable|blocked|unknown|stale)$")
+    observed_at: datetime
+    expires_at: datetime | None = None
+    source: str | None = Field(default=None, max_length=80)
 
 
 class TaskApproval(BaseModel):
@@ -72,12 +91,30 @@ class OperationsStore(Protocol):
     ) -> dict[str, int]: ...
 
     def list_resources(self, context: RequestContext) -> list[dict[str, Any]]: ...
+    def update_readiness(
+        self,
+        context: RequestContext,
+        resource_id: str,
+        update: ResourceReadinessUpdate,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
 
     def create_queue(
         self, context: RequestContext, item: QueueItemCreate, now: datetime, idempotency_key: str
     ) -> dict[str, Any]: ...
 
-    def list_queue(self, context: RequestContext) -> list[dict[str, Any]]: ...
+    def list_queue(
+        self, context: RequestContext, queue_type: str = "response"
+    ) -> list[dict[str, Any]]: ...
+    def create_route_observation(
+        self,
+        context: RequestContext,
+        observation: RouteObservationCreate,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
+    def list_route_observations(self, context: RequestContext) -> list[dict[str, Any]]: ...
 
     def approve_task(
         self,
@@ -175,6 +212,15 @@ class InMemoryOperationsStore:
                 "location": location,
                 "workspace_id": context.workspace_id,
                 "created_at": now.isoformat(),
+                "capabilities": (
+                    ["water_delivery"]
+                    if typ == "water_team"
+                    else ["generator"]
+                    if typ == "power_unit"
+                    else ["medical_transport"]
+                ),
+                "readiness_observed_at": now.isoformat(),
+                "readiness_expires_at": (now + timedelta(hours=4)).isoformat(),
             }
         return self._replay_or_record(
             context, idempotency_key, payload, {"resources": 3, "queue_items": 0}
@@ -184,6 +230,25 @@ class InMemoryOperationsStore:
         return [
             dict(r) for r in self.resources.values() if r["workspace_id"] == context.workspace_id
         ]
+
+    def update_readiness(self, context, resource_id, update, now, idempotency_key):
+        payload = {
+            "operation": "resource.readiness.v1",
+            "resource_id": resource_id,
+            "update": update.model_dump(mode="json"),
+        }
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
+        resource = self.resources.get(resource_id)
+        if resource is None or resource["workspace_id"] != context.workspace_id:
+            raise ResourceNotFoundError
+        resource.update(
+            readiness=update.readiness,
+            readiness_observed_at=update.observed_at.isoformat(),
+            readiness_expires_at=_iso(update.expires_at),
+        )
+        return self._replay_or_record(context, idempotency_key, payload, dict(resource))
 
     def create_queue(
         self, context: RequestContext, item: QueueItemCreate, now: datetime, idempotency_key: str
@@ -203,11 +268,41 @@ class InMemoryOperationsStore:
         self.queue[item_id] = record
         return self._replay_or_record(context, idempotency_key, payload, dict(record))
 
-    def list_queue(self, context: RequestContext) -> list[dict[str, Any]]:
+    def list_queue(
+        self, context: RequestContext, queue_type: str = "response"
+    ) -> list[dict[str, Any]]:
         return [
             dict(item)
             for item in self.queue.values()
             if item["workspace_id"] == context.workspace_id
+            and item.get("queue_type", "response") == queue_type
+        ]
+
+    def create_route_observation(self, context, observation, now, idempotency_key):
+        payload = {
+            "operation": "route.observe.v1",
+            "observation": observation.model_dump(mode="json"),
+        }
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
+        record = {
+            "id": _opaque_id("route"),
+            **observation.model_dump(mode="json"),
+            "workspace_id": context.workspace_id,
+            "created_at": now.isoformat(),
+        }
+        self.queue.setdefault("__routes__", {}) if False else None
+        if not hasattr(self, "routes"):
+            self.routes = {}
+        self.routes[record["id"]] = record
+        return self._replay_or_record(context, idempotency_key, payload, dict(record))
+
+    def list_route_observations(self, context):
+        return [
+            dict(v)
+            for v in getattr(self, "routes", {}).values()
+            if v["workspace_id"] == context.workspace_id
         ]
 
     def approve_task(
@@ -242,6 +337,13 @@ class InMemoryOperationsStore:
             )
         if resource["readiness"] != "ready":
             raise TaskConflictError("resource is not ready")
+        if resource.get("readiness_expires_at") and datetime.fromisoformat(
+            resource["readiness_expires_at"]
+        ) <= now.replace(tzinfo=UTC):
+            raise TaskConflictError("resource readiness is expired")
+        required = item.get("required_capability")
+        if required and required not in resource.get("capabilities", []):
+            raise TaskConflictError("resource lacks required capability")
         if any(
             task["resource_id"] == resource["id"] and task["status"] != "completed"
             for task in self.tasks.values()
@@ -426,7 +528,7 @@ class PostgreSQLOperationsStore:
                 response = {"resources": 0, "queue_items": 0}
             else:
                 cursor.executemany(
-                    "INSERT INTO resources (organization_id, workspace_id, name, resource_type, readiness, location, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO resources (organization_id, workspace_id, name, resource_type, readiness, location, capabilities, readiness_observed_at, readiness_expires_at, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     [
                         (
                             context.tenant_id,
@@ -435,6 +537,15 @@ class PostgreSQLOperationsStore:
                             resource_type,
                             readiness,
                             location,
+                            Jsonb(
+                                ["water_delivery"]
+                                if resource_type == "water_team"
+                                else ["generator"]
+                                if resource_type == "power_unit"
+                                else ["medical_transport"]
+                            ),
+                            now,
+                            now + timedelta(hours=4),
                             now,
                         )
                         for name, resource_type, readiness, location in [
@@ -465,7 +576,7 @@ class PostgreSQLOperationsStore:
     def list_resources(self, context: RequestContext) -> list[dict[str, Any]]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT id, name, resource_type, readiness, location, created_at FROM resources WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at, id",
+                "SELECT id, name, resource_type, readiness, location, capabilities, readiness_observed_at, readiness_expires_at, created_at FROM resources WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at, id",
                 (context.tenant_id, context.workspace_id),
             )
             return [
@@ -475,10 +586,61 @@ class PostgreSQLOperationsStore:
                     "resource_type": row[2],
                     "readiness": row[3],
                     "location": row[4],
-                    "created_at": _iso(row[5]),
+                    "capabilities": row[5],
+                    "readiness_observed_at": _iso(row[6]),
+                    "readiness_expires_at": _iso(row[7]),
+                    "created_at": _iso(row[8]),
                 }
                 for row in cursor.fetchall()
             ]
+
+    def update_readiness(self, context, resource_id, update, now, idempotency_key):
+        payload = {
+            "operation": "resource.readiness.v1",
+            "resource_id": resource_id,
+            "update": update.model_dump(mode="json"),
+        }
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "UPDATE resources SET readiness=%s, readiness_observed_at=%s, readiness_expires_at=%s WHERE id=%s AND organization_id=%s AND workspace_id=%s RETURNING id, name, resource_type, readiness, location, capabilities, readiness_observed_at, readiness_expires_at, created_at",
+                (
+                    update.readiness,
+                    update.observed_at,
+                    update.expires_at,
+                    resource_id,
+                    context.tenant_id,
+                    context.workspace_id,
+                ),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                raise ResourceNotFoundError
+            response = {
+                "id": str(row[0]),
+                "name": row[1],
+                "resource_type": row[2],
+                "readiness": row[3],
+                "location": row[4],
+                "capabilities": row[5],
+                "readiness_observed_at": _iso(row[6]),
+                "readiness_expires_at": _iso(row[7]),
+                "created_at": _iso(row[8]),
+            }
+            self._audit(
+                cursor,
+                context,
+                "resource.readiness_updated",
+                "resource",
+                resource_id,
+                {"readiness": update.readiness},
+                now,
+            )
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
 
     def create_queue(
         self, context: RequestContext, item: QueueItemCreate, now: datetime, idempotency_key: str
@@ -490,7 +652,7 @@ class PostgreSQLOperationsStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "INSERT INTO response_queue_items (organization_id, workspace_id, title, priority, destination, notes, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, 'queued', %s) RETURNING id, title, priority, destination, notes, status, created_at",
+                "INSERT INTO response_queue_items (organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s) RETURNING id, title, priority, destination, notes, queue_type, required_capability, status, created_at",
                 (
                     context.tenant_id,
                     context.workspace_id,
@@ -498,6 +660,8 @@ class PostgreSQLOperationsStore:
                     item.priority,
                     item.destination,
                     item.notes,
+                    item.queue_type,
+                    item.required_capability,
                     now,
                 ),
             )
@@ -508,8 +672,10 @@ class PostgreSQLOperationsStore:
                 "priority": row[2],
                 "destination": row[3],
                 "notes": row[4],
-                "status": row[5],
-                "created_at": _iso(row[6]),
+                "queue_type": row[5],
+                "required_capability": row[6],
+                "status": row[7],
+                "created_at": _iso(row[8]),
             }
             self._audit(
                 cursor,
@@ -523,11 +689,13 @@ class PostgreSQLOperationsStore:
             self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
             return response
 
-    def list_queue(self, context: RequestContext) -> list[dict[str, Any]]:
+    def list_queue(
+        self, context: RequestContext, queue_type: str = "response"
+    ) -> list[dict[str, Any]]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT id, title, priority, destination, notes, status, created_at FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at, id",
-                (context.tenant_id, context.workspace_id),
+                "SELECT id, title, priority, destination, notes, queue_type, required_capability, status, created_at FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s AND queue_type = %s ORDER BY created_at, id",
+                (context.tenant_id, context.workspace_id, queue_type),
             )
             return [
                 {
@@ -536,10 +704,76 @@ class PostgreSQLOperationsStore:
                     "priority": row[2],
                     "destination": row[3],
                     "notes": row[4],
-                    "status": row[5],
-                    "created_at": _iso(row[6]),
+                    "queue_type": row[5],
+                    "required_capability": row[6],
+                    "status": row[7],
+                    "created_at": _iso(row[8]),
                 }
                 for row in cursor.fetchall()
+            ]
+
+    def create_route_observation(self, context, observation, now, idempotency_key):
+        payload = {
+            "operation": "route.observe.v1",
+            "observation": observation.model_dump(mode="json"),
+        }
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "INSERT INTO route_observations (organization_id, workspace_id, destination, state, source, observed_at, expires_at, created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id, destination, state, source, observed_at, expires_at, created_at",
+                (
+                    context.tenant_id,
+                    context.workspace_id,
+                    observation.destination,
+                    observation.state,
+                    observation.source,
+                    observation.observed_at,
+                    observation.expires_at,
+                    now,
+                ),
+            )
+            row = cursor.fetchone()
+            response = {
+                "id": str(row[0]),
+                "destination": row[1],
+                "state": row[2],
+                "source": row[3],
+                "observed_at": _iso(row[4]),
+                "expires_at": _iso(row[5]),
+                "created_at": _iso(row[6]),
+            }
+            self._audit(
+                cursor,
+                context,
+                "route.observed",
+                "route",
+                response["id"],
+                {"destination": observation.destination, "state": observation.state},
+                now,
+            )
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
+
+    def list_route_observations(self, context):
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, destination, state, source, observed_at, expires_at, created_at FROM route_observations WHERE organization_id=%s AND workspace_id=%s ORDER BY observed_at DESC, id",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [
+                {
+                    "id": str(r[0]),
+                    "destination": r[1],
+                    "state": r[2],
+                    "source": r[3],
+                    "observed_at": _iso(r[4]),
+                    "expires_at": _iso(r[5]),
+                    "created_at": _iso(r[6]),
+                }
+                for r in cursor.fetchall()
             ]
 
     def approve_task(
@@ -561,13 +795,14 @@ class PostgreSQLOperationsStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "SELECT id FROM response_queue_items WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
+                "SELECT id, required_capability FROM response_queue_items WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
                 (queue_id, context.tenant_id, context.workspace_id),
             )
-            if cursor.fetchone() is None:
+            queue_row = cursor.fetchone()
+            if queue_row is None:
                 raise QueueItemNotFoundError
             cursor.execute(
-                "SELECT id, readiness FROM resources WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
+                "SELECT id, readiness, capabilities, readiness_expires_at FROM resources WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
                 (approval.resource_id, context.tenant_id, context.workspace_id),
             )
             resource = cursor.fetchone()
@@ -591,6 +826,10 @@ class PostgreSQLOperationsStore:
                 return response
             if resource[1] != "ready":
                 raise TaskConflictError("resource is not ready")
+            if resource[3] is not None and resource[3] <= now:
+                raise TaskConflictError("resource readiness is expired")
+            if queue_row[1] and queue_row[1] not in (resource[2] or []):
+                raise TaskConflictError("resource lacks required capability")
             try:
                 cursor.execute(
                     "INSERT INTO response_tasks (organization_id, workspace_id, queue_item_id, resource_id, status, approved_by, approved_at) VALUES (%s, %s, %s, %s, 'assigned', %s, %s) RETURNING id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at",

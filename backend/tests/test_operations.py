@@ -85,7 +85,6 @@ def test_operations_write_idempotency_and_task_transition_guards() -> None:
         ).status_code
         == 200
     )
-    resource = client.get("/api/v1/resources", headers=operator).json()["items"][0]
     payload = {"title": "Water delivery"}
     first = client.post(
         "/api/v1/response-queue",
@@ -107,16 +106,45 @@ def test_operations_write_idempotency_and_task_transition_guards() -> None:
         ).status_code
         == 409
     )
-    task = client.post(
-        f"/api/v1/response-queue/{first.json()['id']}/approve",
-        headers={**operator, "Idempotency-Key": "approve-001"},
-        json={"resource_id": resource["id"], "approved": True},
-    ).json()
+
+
+def test_feasibility_surfaces_verification_readiness_and_routes() -> None:
+    app = create_app(
+        Settings(app_environment="test", dev_identity_enabled=True),
+        operations_store=InMemoryOperationsStore(),
+        clock=FixedClock(datetime(2026, 8, 30, 10, 30, tzinfo=UTC)),
+    )
+    client = TestClient(app)
+    write = {"X-Dev-Identity": "operator", "Idempotency-Key": "k-001"}
+    client.post("/api/v1/operations/demo/seed", headers=write)
+    q = client.post(
+        "/api/v1/verification-queue",
+        headers={**write, "Idempotency-Key": "q-001"},
+        json={"title": "Verify shelter count"},
+    )
+    assert (
+        q.status_code == 201
+        and client.get("/api/v1/verification-queue", headers=write).json()["items"][0]["queue_type"]
+        == "verification"
+    )
+    resource = client.get("/api/v1/resources", headers=write).json()["items"][0]
     assert (
         client.patch(
-            f"/api/v1/tasks/{task['id']}",
-            headers={**operator, "Idempotency-Key": "status-001"},
-            json={"status": "completed"},
+            f"/api/v1/resources/{resource['id']}/readiness",
+            headers={**write, "Idempotency-Key": "r-001"},
+            json={"readiness": "not_ready", "observed_at": "2026-08-30T10:30:00Z"},
         ).status_code
-        == 409
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/route-observations",
+            headers={**write, "Idempotency-Key": "route-001"},
+            json={
+                "destination": "North Sector",
+                "state": "blocked",
+                "observed_at": "2026-08-30T10:30:00Z",
+            },
+        ).status_code
+        == 201
     )

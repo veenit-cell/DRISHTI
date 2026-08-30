@@ -1,7 +1,22 @@
-# Phase 3 Handoff — Operational State and Tasking
+# Phase 3 Handoff — Operational feasibility
 
-Implemented synthetic resource readiness, response queue items, explicit operator approval, task status updates, and active-resource no-double-booking.
+## Delivered
 
-APIs: `POST /api/v1/operations/demo/seed`, `GET /api/v1/resources`, `POST/GET /api/v1/response-queue`, `POST /api/v1/response-queue/{id}/approve`, `GET /api/v1/tasks`, and `PATCH /api/v1/tasks/{id}`. Approval creates an `assigned` task only for a ready resource; a resource cannot receive another active task until completion. Viewer identities are read-only.
+- Durable resource capability metadata and readiness observation/expiry fields.
+- Explicit response and verification queue APIs with scoped reads and idempotent writes.
+- Human-only task approval remains required; readiness expiry and capability mismatch reject approval.
+- Route observations are synthetic, bounded state (`passable`, `blocked`, `unknown`, `stale`) with read/write APIs.
+- Existing partial unique index and lifecycle guard preserve no-double-booking and assigned → acknowledged → en_route → completed.
 
-`scripts/check.ps1` validates the path. Docker/PostGIS was unavailable, so the SQL migration was not run live; dispatch integrations, telemetry, and frontend polish remain deferred.
+## Validation
+
+```powershell
+.\.venv\Scripts\python.exe -m app.persistence
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+Result: **28 passed**; Ruff check passed. Migration `0006_operations_feasibility.sql` applied locally.
+
+## Limitations
+
+No routing engine, live readiness feeds, automated dispatch, notification, or production authorization matrix was added. Route state is operator-entered synthetic evidence; unknown remains unknown.

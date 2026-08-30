@@ -19,6 +19,8 @@ from app.operations import (
     QueueItemCreate,
     QueueItemNotFoundError,
     ResourceNotFoundError,
+    ResourceReadinessUpdate,
+    RouteObservationCreate,
     TaskApproval,
     TaskConflictError,
     TaskNotFoundError,
@@ -289,6 +291,27 @@ async def list_resources(
     return {"items": request.app.state.operations_store.list_resources(context)}
 
 
+@router.patch("/resources/{resource_id}/readiness", tags=["operations"], response_model=None)
+async def update_readiness(
+    request: Request,
+    resource_id: str,
+    update: ResourceReadinessUpdate,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+):
+    try:
+        return request.app.state.operations_store.update_readiness(
+            context, resource_id, update, request.app.state.clock.now(), idempotency_key
+        )
+    except ResourceNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="RESOURCE_NOT_FOUND",
+            title="Resource not found",
+            detail="The resource is outside the current scope.",
+        ) from None
+
+
 @router.post("/response-queue", tags=["operations"], response_model=None, status_code=201)
 async def create_response_queue(
     request: Request,
@@ -313,7 +336,64 @@ async def create_response_queue(
 async def list_response_queue(
     request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
 ) -> dict[str, Any]:
-    return {"items": request.app.state.operations_store.list_queue(context)}
+    return {"items": request.app.state.operations_store.list_queue(context, "response")}
+
+
+@router.post("/verification-queue", tags=["operations"], response_model=None, status_code=201)
+async def create_verification_queue(
+    request: Request,
+    item: QueueItemCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+):
+    try:
+        return request.app.state.operations_store.create_queue(
+            context,
+            item.model_copy(update={"queue_type": "verification"}),
+            request.app.state.clock.now(),
+            idempotency_key,
+        )
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
+
+
+@router.get("/verification-queue", tags=["operations"], response_model=None)
+async def list_verification_queue(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
+):
+    return {"items": request.app.state.operations_store.list_queue(context, "verification")}
+
+
+@router.post("/route-observations", tags=["operations"], response_model=None, status_code=201)
+async def create_route_observation(
+    request: Request,
+    observation: RouteObservationCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+):
+    try:
+        return request.app.state.operations_store.create_route_observation(
+            context, observation, request.app.state.clock.now(), idempotency_key
+        )
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
+
+
+@router.get("/route-observations", tags=["operations"], response_model=None)
+async def list_route_observations(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
+):
+    return {"items": request.app.state.operations_store.list_route_observations(context)}
 
 
 @router.post("/response-queue/{queue_id}/approve", tags=["operations"], response_model=None)
