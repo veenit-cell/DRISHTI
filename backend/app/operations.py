@@ -415,6 +415,8 @@ class InMemoryOperationsStore:
             raise TaskConflictError(f"cannot change task from {task['status']} to {status}")
         task["status"] = status
         task["updated_at"] = now.isoformat()
+        if status == "completed":
+            self.queue[task["queue_item_id"]]["status"] = "completed"
         return self._replay_or_record(context, idempotency_key, payload, dict(task))
 
     def list_tasks(self, context: RequestContext) -> list[dict[str, Any]]:
@@ -981,6 +983,11 @@ class PostgreSQLOperationsStore:
                 (status, now, task_id),
             )
             response = _task_record(cursor.fetchone())
+            if status == "completed":
+                cursor.execute(
+                    "UPDATE response_queue_items SET status = 'completed' WHERE id = %s",
+                    (task[1],),
+                )
             self._audit(
                 cursor, context, "task.status_updated", "task", task_id, {"status": status}, now
             )

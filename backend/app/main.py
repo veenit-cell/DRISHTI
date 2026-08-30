@@ -40,10 +40,15 @@ def create_app(
     )
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[str(origin) for origin in resolved_settings.allowed_origins],
+        allow_origins=[str(origin).rstrip("/") for origin in resolved_settings.allowed_origins],
         allow_credentials=False,
-        allow_methods=["GET"],
-        allow_headers=["Content-Type", "X-Correlation-ID", "X-Dev-Identity"],
+        allow_methods=["GET", "POST", "PATCH"],
+        allow_headers=[
+            "Content-Type",
+            "Idempotency-Key",
+            "X-Correlation-ID",
+            "X-Dev-Identity",
+        ],
     )
     app.add_middleware(
         RequestGuardMiddleware,

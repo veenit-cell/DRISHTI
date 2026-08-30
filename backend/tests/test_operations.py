@@ -67,6 +67,9 @@ def test_tasking_requires_approval_and_prevents_double_booking() -> None:
         json={"summary": "Synthetic water delivery completed"},
     )
     assert outcome.status_code == 200 and outcome.json()["outcome_summary"]
+    assert client.get("/api/v1/response-queue", headers=headers("read-002")).json()["items"][0][
+        "status"
+    ] == "completed"
     assert (
         client.post(
             f"/api/v1/response-queue/{q2['id']}/approve",
@@ -161,6 +164,28 @@ def test_queue_provenance_must_resolve_in_current_scope() -> None:
     )
     assert incident_queue.status_code == 201
     assert incident_queue.json()["source_incident_id"] == incident["id"]
+
+
+def test_cors_allows_mutating_api_contract_headers() -> None:
+    app = create_app(
+        Settings(
+            app_environment="test",
+            dev_identity_enabled=True,
+            allowed_origins=["http://localhost:5173"],
+        ),
+        operations_store=InMemoryOperationsStore(),
+    )
+    response = TestClient(app).options(
+        "/api/v1/response-queue",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type,idempotency-key,x-dev-identity",
+        },
+    )
+    assert response.status_code == 200
+    assert "POST" in response.headers["access-control-allow-methods"]
+    assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
 
 
 def test_feasibility_surfaces_verification_readiness_and_routes() -> None:
