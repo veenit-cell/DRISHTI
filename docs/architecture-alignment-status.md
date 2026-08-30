@@ -148,6 +148,18 @@ Verification update: `pytest backend/tests -q` = **64 passed**; Ruff and diff ch
 
 Limitations: the demo worker is intentionally one-shot and the SITREP handler is local deterministic output; production multi-worker orchestration, external delivery, and database-specific concurrency execution require deployment wiring.
 
+## `import-export`
+
+**Status:** Implemented as a bounded CSV/GeoJSON fixture adapter.
+
+- `backend/app/import_export.py` accepts only inline CSV or GeoJSON with explicit schema/mapping versions, provenance, replay time, byte/row/feature/geometry limits, and per-record validation. Invalid originals are quarantined while valid commands remain available as canonical report commands.
+- Exports provide scoped redacted CSV with formula-injection protection and deterministic SITREP summaries that exclude future replay data.
+- `POST /api/v1/imports/fixture`, `/api/v1/exports/csv`, and `/api/v1/exports/sitrep` enforce evidence scopes; imports do not write private tables directly.
+
+Verification update: `pytest backend/tests -q` = **67 passed**; Ruff and diff check passed.
+
+Limitations: no external integrations, attachment scanning, ZIP ingestion, or large mapping system is included; command application remains the responsibility of the public evidence/operations interfaces.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

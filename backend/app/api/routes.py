@@ -1,3 +1,6 @@
+# ruff: noqa: E501
+
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -17,6 +20,7 @@ from app.evidence import (
     ReportCreate,
     ReportNotFoundError,
 )
+from app.import_export import ImportRequest, export_redacted_csv, export_sitrep, import_fixture
 from app.offline_sync import SyncBatch
 from app.operations import (
     IdempotencyConflictError,
@@ -420,6 +424,36 @@ async def reconcile_offline_commands(
     return request.app.state.offline_sync_store.reconcile(
         batch, context.tenant_id, context.workspace_id, request.app.state.clock.now()
     )
+
+
+@router.post("/imports/fixture", tags=["evidence"], response_model=None)
+async def import_fixture_path(
+    request: ImportRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+) -> dict[str, Any]:
+    if request.tenant_id != context.tenant_id or request.workspace_id != context.workspace_id:
+        raise ApiProblem(status=403, code="SCOPE_DENIED", title="Import scope denied", detail="Import scope must match the caller.")
+    return import_fixture(request).model_dump(mode="json")
+
+
+@router.post("/exports/sitrep", tags=["evidence"], response_model=None)
+async def export_sitrep_path(
+    body: dict[str, Any],
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, Any]:
+    if body.get("tenant_id") != context.tenant_id or body.get("workspace_id") != context.workspace_id:
+        raise ApiProblem(status=403, code="SCOPE_DENIED", title="Export scope denied", detail="Export scope must match the caller.")
+    return export_sitrep(body.get("rows", []), datetime.fromisoformat(body["replay_at"].replace("Z", "+00:00")))
+
+
+@router.post("/exports/csv", tags=["evidence"], response_model=None)
+async def export_csv_path(
+    body: dict[str, Any],
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, str]:
+    if body.get("tenant_id") != context.tenant_id or body.get("workspace_id") != context.workspace_id:
+        raise ApiProblem(status=403, code="SCOPE_DENIED", title="Export scope denied", detail="Export scope must match the caller.")
+    return {"content_type": "text/csv", "content": export_redacted_csv(body.get("rows", []), context.tenant_id, context.workspace_id)}
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)
