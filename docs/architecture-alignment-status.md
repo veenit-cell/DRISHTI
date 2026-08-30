@@ -98,6 +98,19 @@ Verification update: `pytest backend/tests/test_decision_snapshot.py -q` = **4 p
 
 Limitations: this packet does not rewrite evidence/decision persistence or invent a live snapshot store; callers provide already-resolved scoped records.
 
+## `operator-workspace`
+
+**Status:** Implemented as a small feature-oriented React operator workspace.
+
+- `frontend/src/features/operator/OperatorWorkspace.tsx` separates decision overview, recommendations, evidence provenance, operations, and spatial list components; `fixtures.ts` is explicitly labeled synthetic fallback data.
+- The screen answers failure/next failure/time/why, unknown and stale state, intervention comparison, recommendation, do-nothing framing, excluded resources, commander approval/rejection, evidence provenance, both queues, readiness/routes, task lifecycle, outcomes, and bounded coordinates.
+- Loading, offline, unauthorized, error, and empty states are explicit and text-labelled; status is not conveyed by color alone. GeoJSON is represented as an accessible coordinate list because no map library is installed.
+- `OperatorWorkspace.contract.test.ts` provides dependency-free component contract assertions; no backend domain logic is implemented in React.
+
+Verification update: `npm --prefix frontend run build` (TypeScript + Vite production build) passed. Fixture contract assertions are available to a browser/test harness; no test runner dependency was added.
+
+Limitations: read-only intelligence endpoints are not yet aggregated into one frontend client, so this checkpoint uses clearly labeled local fixtures for the complete operator flow.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.
