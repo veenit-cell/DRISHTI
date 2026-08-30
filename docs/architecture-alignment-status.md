@@ -109,7 +109,9 @@ Limitations: this packet does not rewrite evidence/decision persistence or inven
 
 Verification update: `npm --prefix frontend run build` (TypeScript + Vite production build) passed. Fixture contract assertions are available to a browser/test harness; no test runner dependency was added.
 
-Limitations: read-only intelligence endpoints are not yet aggregated into one frontend client, so this checkpoint uses clearly labeled local fixtures for the complete operator flow.
+Golden-flow update: the operator workspace now uses a typed API adapter for replay, ranked recommendations, explicit commander approval/rejection, route confirmation, manual assignment, task acknowledgement/en-route/completion, outcome recording, both queues, resources, and audit. Fixtures remain only as an explicitly labelled offline fallback.
+
+Limitations: the visible projection cards adapt the fixed backend replay signals rather than calling every packet-local pure evaluator independently; broader UI polish remains separate work.
 
 ## `offline-sync`
 
