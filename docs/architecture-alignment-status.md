@@ -136,6 +136,18 @@ Verification update: security tests cover missing/invalid/expired identity, role
 
 Limitations: no external OIDC provider or secrets are configured. RLS policies are not enabled by this migration until API transactions set `app.tenant_id` and `app.workspace_id`; direct database isolation therefore remains a deployment task, not a production claim.
 
+## `jobs-outbox`
+
+**Status:** Implemented as a PostgreSQL-compatible transactional outbox/job reliability slice with a bounded worker.
+
+- `backend/app/jobs_outbox.py` provides atomic domain-write + event + job enqueue semantics, leases, exclusive claims, attempt counts, capped exponential backoff, idempotent handler keys, success/retry/dead states, reclaimable leases, and backlog age visibility.
+- PostgreSQL tables receive handler-key uniqueness and backlog indexes in migration `0014_jobs_outbox_reliability.sql`; `backend/app/worker.py --once` processes at most one deterministic SITREP job.
+- In-memory parity tests cover rollback, claim exclusivity, lease reclaim, retry/terminal visibility, idempotent handling, and restart-style processing.
+
+Verification update: `pytest backend/tests -q` = **64 passed**; Ruff and diff check passed.
+
+Limitations: the demo worker is intentionally one-shot and the SITREP handler is local deterministic output; production multi-worker orchestration, external delivery, and database-specific concurrency execution require deployment wiring.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.
