@@ -31,6 +31,20 @@
 | `npm --prefix frontend run build` | TypeScript and Vite build passed |
 | `git diff --check` | passed |
 
+## `runway-projection`
+
+**Status:** Implemented as a pure, bounded deterministic module.
+
+- `backend/app/runway.py` defines a typed snapshot adapter and `runway_v1` formulas for water, battery/power, medicine, and cold-chain reserve.
+- Population influx adjusts demand; explicit thresholds, capacities, replenishment, freshness, units, contributors, confidence, and horizon flags are returned.
+- Missing/invalid required inputs return `unknown`; stale inputs remain labeled with low confidence; net replenishment returns `not_depleting`.
+- `POST /api/v1/runway/projections` evaluates an explicit snapshot without persistence or mutation.
+- Tests cover depletion, threshold crossing, replenishment, invalid/unknown/stale inputs, deterministic replay, formula version, and API immutability.
+
+Verification update: `pytest backend/tests -q` = **43 passed**; Ruff, frontend build, migrations, and `git diff --check` passed.
+
+Limitations: battery projections require explicit battery capacity and replenishment inputs; cold-chain depletion requires an explicit rate; treatment capacity is reported as context but not assumed to produce potable water without a confirmed transfer.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

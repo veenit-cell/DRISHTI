@@ -28,6 +28,7 @@ from app.operations import (
     TaskStatusUpdate,
 )
 from app.persistence import database_ready
+from app.runway import RunwayRequest, project_runway
 from app.shelter_state import (
     ShelterConflictError,
     ShelterCreate,
@@ -352,6 +353,15 @@ async def seed_shelter_state_demo(
     request: Request, context: Annotated[RequestContext, Depends(require_scopes("state:write"))]
 ) -> dict[str, Any]:
     return request.app.state.shelter_state_store.seed_demo(context, request.app.state.clock.now())
+
+
+@router.post("/runway/projections", tags=["shelter-state"], response_model=None)
+async def project_resource_runway(
+    request: RunwayRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("state:read"))],
+) -> dict[str, Any]:
+    del context
+    return project_runway(request).model_dump(mode="json")
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)
