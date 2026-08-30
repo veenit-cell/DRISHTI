@@ -43,9 +43,49 @@ from app.shelter_state import (
     ShelterNotFoundError,
     ShelterObservationCreate,
 )
+from app.updates import UpdatePublish
 from app.what_if import WhatIfRequest, evaluate_what_if
 
 router = APIRouter()
+
+
+@router.get("/updates", tags=["operations"], response_model=None)
+async def poll_updates(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+    cursor: str | None = Query(default=None, max_length=128),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> dict[str, Any]:
+    try:
+        return request.app.state.update_feed.poll(context.tenant_id, context.workspace_id, cursor, limit)
+    except ValueError:
+        raise ApiProblem(status=422, code="INVALID_UPDATE_CURSOR", title="Invalid update cursor", detail="The update cursor is malformed.") from None
+
+
+@router.get("/metrics", tags=["system"], response_model=None)
+async def metrics(request: Request, context: Annotated[RequestContext, Depends(require_scopes("system:read"))]) -> dict[str, Any]:
+    del context
+    return request.app.state.telemetry.snapshot()
+
+
+@router.post("/updates", tags=["operations"], status_code=201, response_model=None)
+async def publish_update(
+    request: Request,
+    update: UpdatePublish,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, str]:
+    """Packet-local adapter for committed operational changes in the demo."""
+    payload = {"aggregate_id": update.aggregate_id}
+    if update.status is not None:
+        payload["status"] = update.status
+    cursor = request.app.state.update_feed.publish(
+        context.tenant_id,
+        context.workspace_id,
+        update.event_type,
+        payload,
+        request.app.state.clock.now().isoformat(),
+    )
+    return {"cursor": cursor}
 
 
 def _validate_queue_sources(

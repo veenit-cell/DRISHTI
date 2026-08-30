@@ -160,6 +160,18 @@ Verification update: `pytest backend/tests -q` = **67 passed**; Ruff and diff ch
 
 Limitations: no external integrations, attachment scanning, ZIP ingestion, or large mapping system is included; command application remains the responsibility of the public evidence/operations interfaces.
 
+## `updates-telemetry`
+
+**Status:** Implemented as a bounded, scoped polling update adapter with low-cardinality telemetry.
+
+- `backend/app/updates.py` provides monotonic cursors, bounded pages, reconnect catch-up, tenant/workspace filtering, and a packet-local publish contract. Cursors remain stable when older events are trimmed.
+- `GET /api/v1/updates` requires `operations:read`; `POST /api/v1/updates` is a safe demo publisher requiring `operations:write`. `GET /api/v1/metrics` requires `system:read` and exposes bounded request latency, errors, queue/job gauges, recommendation, and sync-conflict counters.
+- Request logs contain method, status, and duration only. Event payloads, report bodies, tokens, personal data, and exact locations are not emitted to telemetry.
+
+Verification update: `pytest -q` from `backend` = **71 passed**; focused polling/telemetry tests = **4 passed**.
+
+Limitations: polling is the required path; no broker or WebSocket transport is included. The packet-local feed is process memory and must be replaced with committed outbox/audit reads for multi-process deployment. Queue/job gauges are bounded demo values until stores expose aggregate counts.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

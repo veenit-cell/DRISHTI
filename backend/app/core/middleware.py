@@ -98,12 +98,24 @@ class RequestGuardMiddleware:
             await send({"type": "http.response.body", "body": body})
             return
         started = time.perf_counter()
-        await self.app(scope, receive, send)
+        status = 500
+
+        async def send_with_status(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = int(message.get("status", 500))
+            await send(message)
+
+        await self.app(scope, receive, send_with_status)
+        app = scope.get("app")
+        telemetry = getattr(getattr(app, "state", None), "telemetry", None)
+        if telemetry is not None:
+            telemetry.request("http", status, started)
         self.logger.info(
             "request_complete",
             extra={
                 "method": scope.get("method"),
-                "path": scope.get("path"),
+                "status": status,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
             },
         )

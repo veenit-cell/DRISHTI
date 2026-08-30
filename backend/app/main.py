@@ -15,6 +15,7 @@ from app.evidence import EvidenceStore, PostgreSQLEvidenceStore
 from app.offline_sync import OfflineSyncStore
 from app.operations import InMemoryOperationsStore, OperationsStore, PostgreSQLOperationsStore
 from app.shelter_state import PostgreSQLShelterStateStore, ShelterStateStore
+from app.updates import Telemetry, UpdateFeed
 
 
 def create_app(
@@ -34,6 +35,8 @@ def create_app(
     app.state.settings = resolved_settings
     app.state.clock = clock or SystemClock()
     app.state.offline_sync_store = OfflineSyncStore()
+    app.state.update_feed = UpdateFeed()
+    app.state.telemetry = Telemetry()
     app.state.evidence_store = evidence_store or PostgreSQLEvidenceStore(
         resolved_settings.database_url
     )
