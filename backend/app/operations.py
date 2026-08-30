@@ -369,8 +369,13 @@ class InMemoryOperationsStore:
                 and r["destination"] == item["destination"]
             ]
             latest = max(observations, key=lambda r: r["observed_at"], default=None)
-            if latest and latest["state"] != "passable":
-                raise TaskConflictError("route is not passable")
+            if (
+                latest is None
+                or latest["state"] != "passable"
+                or latest.get("expires_at") is None
+                or datetime.fromisoformat(latest["expires_at"]) <= now.replace(tzinfo=UTC)
+            ):
+                raise TaskConflictError("route is not confirmed passable")
         if any(
             task["resource_id"] == resource["id"] and task["status"] != "completed"
             for task in self.tasks.values()
@@ -874,7 +879,7 @@ class PostgreSQLOperationsStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "SELECT id, required_capability FROM response_queue_items WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
+                "SELECT id, required_capability, destination FROM response_queue_items WHERE id = %s AND organization_id = %s AND workspace_id = %s FOR UPDATE",
                 (queue_id, context.tenant_id, context.workspace_id),
             )
             queue_row = cursor.fetchone()
@@ -910,12 +915,14 @@ class PostgreSQLOperationsStore:
             if queue_row[1] and queue_row[1] not in (resource[2] or []):
                 raise TaskConflictError("resource lacks required capability")
             cursor.execute(
-                "SELECT state, expires_at FROM route_observations WHERE organization_id=%s AND workspace_id=%s AND destination=(SELECT destination FROM response_queue_items WHERE id=%s) ORDER BY observed_at DESC LIMIT 1",
+                "SELECT state, expires_at, destination FROM route_observations WHERE organization_id=%s AND workspace_id=%s AND destination=(SELECT destination FROM response_queue_items WHERE id=%s) ORDER BY observed_at DESC LIMIT 1",
                 (context.tenant_id, context.workspace_id, queue_id),
             )
             route = cursor.fetchone()
-            if route and route[0] != "passable" and (route[1] is None or route[1] > now):
-                raise TaskConflictError("route is not passable")
+            if queue_row[2] is not None and (
+                route is None or route[0] != "passable" or route[1] is None or route[1] <= now
+            ):
+                raise TaskConflictError("route is not confirmed passable")
             try:
                 cursor.execute(
                     "INSERT INTO response_tasks (organization_id, workspace_id, queue_item_id, resource_id, status, approved_by, approved_at) VALUES (%s, %s, %s, %s, 'assigned', %s, %s) RETURNING id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at",

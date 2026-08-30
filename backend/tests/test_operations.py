@@ -262,3 +262,48 @@ def test_blocked_route_prevents_task_approval() -> None:
         ).status_code
         == 409
     )
+
+
+def test_destination_task_requires_fresh_confirmed_passable_route() -> None:
+    app = create_app(
+        Settings(app_environment="test", dev_identity_enabled=True),
+        operations_store=InMemoryOperationsStore(),
+        clock=FixedClock(datetime(2026, 8, 30, 10, 30, tzinfo=UTC)),
+    )
+    client = TestClient(app)
+    headers = {"X-Dev-Identity": "operator"}
+    client.post(
+        "/api/v1/operations/demo/seed",
+        headers={**headers, "Idempotency-Key": "seed-route"},
+    )
+    resource = client.get("/api/v1/resources", headers=headers).json()["items"][0]
+
+    def queue(key: str) -> str:
+        return client.post(
+            "/api/v1/response-queue",
+            headers={**headers, "Idempotency-Key": key},
+            json={"title": "Deliver water", "destination": "North Sector"},
+        ).json()["id"]
+
+    missing_route = queue("queue-missing-route")
+    assert client.post(
+        f"/api/v1/response-queue/{missing_route}/approve",
+        headers={**headers, "Idempotency-Key": "approve-missing-route"},
+        json={"resource_id": resource["id"], "approved": True},
+    ).status_code == 409
+    assert client.post(
+        "/api/v1/route-observations",
+        headers={**headers, "Idempotency-Key": "route-passable"},
+        json={
+            "destination": "North Sector",
+            "state": "passable",
+            "observed_at": "2026-08-30T10:30:00Z",
+            "expires_at": "2026-08-30T11:00:00Z",
+        },
+    ).status_code == 201
+    confirmed_route = queue("queue-confirmed-route")
+    assert client.post(
+        f"/api/v1/response-queue/{confirmed_route}/approve",
+        headers={**headers, "Idempotency-Key": "approve-confirmed-route"},
+        json={"resource_id": resource["id"], "approved": True},
+    ).status_code == 200
