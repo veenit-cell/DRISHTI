@@ -59,6 +59,19 @@ Verification update: `pytest backend/tests/test_cascade.py -q` = **4 passed**; `
 
 Limitations: this is an operational pressure/capability signal, not a clinical diagnosis, forecast, dispatch, or ML model. It uses caller-supplied snapshot fixtures and does not infer missing measurements.
 
+## `what-if`
+
+**Status:** Implemented as a bounded, evaluation-only intervention comparison module.
+
+- `backend/app/what_if.py` adapts explicit runway snapshots and supports four synthetic interventions: potable-water addition, purification rate/power cost, non-critical load shifting, and expected influx changes.
+- Every request returns baseline, do-nothing, and intervention projections with changed inputs, trade-offs, uncertainty, per-scenario hashes, and a stable input hash. Source snapshots are deep-copied and never mutated.
+- Units, intervention combinations, and horizons are validated; extra live IDs/provenance/timestamp mutation fields are rejected by the typed contract.
+- `POST /api/v1/what-if/evaluate` is scoped to `decision:read` and never writes operational state.
+
+Verification update: `pytest backend/tests/test_what_if.py -q` = **3 passed**; full suite and diff checks recorded in the handoff.
+
+Limitations: interventions are synthetic, single-action comparisons over caller-provided runway inputs; no live state, transfer workflow, or persistence is involved.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

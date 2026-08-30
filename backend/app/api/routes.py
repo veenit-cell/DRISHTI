@@ -36,6 +36,7 @@ from app.shelter_state import (
     ShelterNotFoundError,
     ShelterObservationCreate,
 )
+from app.what_if import WhatIfRequest, evaluate_what_if
 
 router = APIRouter()
 
@@ -372,6 +373,15 @@ async def evaluate_cascade_path(
 ) -> dict[str, Any]:
     del context
     return evaluate_cascade(request).model_dump(mode="json")
+
+
+@router.post("/what-if/evaluate", tags=["decision-loop"], response_model=None)
+async def evaluate_what_if_path(
+    request: WhatIfRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    del context
+    return evaluate_what_if(request).model_dump(mode="json")
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)
