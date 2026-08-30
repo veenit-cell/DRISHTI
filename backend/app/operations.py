@@ -135,6 +135,7 @@ class OperationsStore(Protocol):
     ) -> dict[str, Any]: ...
 
     def list_tasks(self, context: RequestContext) -> list[dict[str, Any]]: ...
+    def list_jobs(self, context: RequestContext) -> list[dict[str, Any]]: ...
 
     def reset_for_replay(self, context: RequestContext, now: datetime) -> None: ...
 
@@ -406,6 +407,9 @@ class InMemoryOperationsStore:
             if task["workspace_id"] == context.workspace_id
         ]
 
+    def list_jobs(self, context):
+        return []
+
     def reset_for_replay(self, context: RequestContext, now: datetime) -> None:
         self.resources = {
             key: value
@@ -504,7 +508,22 @@ class PostgreSQLOperationsStore:
         now: datetime,
     ) -> None:
         cursor.execute(
-            "INSERT INTO audit_events (id, organization_id, workspace_id, actor_id, action, subject_type, subject_id, correlation_id, occurred_at, recorded_at, details) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "SELECT event_hash FROM audit_events WHERE organization_id=%s AND workspace_id=%s ORDER BY recorded_at DESC, id DESC LIMIT 1",
+            (context.tenant_id, context.workspace_id),
+        )
+        previous = cursor.fetchone()
+        previous_hash = previous[0] if previous else None
+        event_hash = _request_hash(
+            {
+                "previous_hash": previous_hash,
+                "action": action,
+                "subject_id": subject_id,
+                "occurred_at": now.isoformat(),
+                "details": details,
+            }
+        )
+        cursor.execute(
+            "INSERT INTO audit_events (id, organization_id, workspace_id, actor_id, action, subject_type, subject_id, correlation_id, occurred_at, recorded_at, details, previous_hash, event_hash) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 _opaque_id("evt"),
                 context.tenant_id,
@@ -517,6 +536,8 @@ class PostgreSQLOperationsStore:
                 now,
                 now,
                 Jsonb(details),
+                previous_hash,
+                event_hash,
             ),
         )
 
@@ -926,6 +947,24 @@ class PostgreSQLOperationsStore:
                 (context.tenant_id, context.workspace_id),
             )
             return [_task_record(row) for row in cursor.fetchall()]
+
+    def list_jobs(self, context):
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, job_type, status, attempt_count, last_error_code, updated_at FROM jobs WHERE organization_id=%s AND workspace_id=%s ORDER BY updated_at DESC, id LIMIT 100",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [
+                {
+                    "id": str(r[0]),
+                    "job_type": r[1],
+                    "status": r[2],
+                    "attempt_count": r[3],
+                    "last_error_code": r[4],
+                    "updated_at": _iso(r[5]),
+                }
+                for r in cursor.fetchall()
+            ]
 
     def reset_for_replay(self, context: RequestContext, now: datetime) -> None:
         with self._connection() as connection, connection.cursor() as cursor:

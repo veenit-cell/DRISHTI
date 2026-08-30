@@ -27,3 +27,11 @@ Remaining: direct evidence/incident IDs in recommendation inputs, full field out
 | Geospatial feasibility | Improved / demo slice | Task approval rejects a latest non-passable route observation. |
 | Concurrency/recovery proof | Regression covered | No-double-booking remains enforced and the focused route test passes; recovery drill remains open. |
 | Authorization hardening | Regression covered | Scoped write/read dependencies and invalid-input tests remain green. |
+
+## Latest three gaps
+
+| Gap | Status | Evidence |
+|---|---|---|
+| Audit integrity | Improved / demo slice | PostgreSQL audit rows now carry chained `previous_hash` and `event_hash` values. |
+| Async job visibility | Partial | Scoped `GET /jobs` exposes queued/leased/failed state; workers and leasing remain deferred. |
+| Realtime fallback | Demo slice | Decision audit supports bounded `after` polling with `next_after`; WebSockets remain deferred. |

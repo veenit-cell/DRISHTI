@@ -442,6 +442,13 @@ async def list_tasks(
     return {"items": request.app.state.operations_store.list_tasks(context)}
 
 
+@router.get("/jobs", tags=["operations"], response_model=None)
+async def list_jobs(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
+) -> dict[str, Any]:
+    return {"items": request.app.state.operations_store.list_jobs(context)}
+
+
 @router.patch("/tasks/{task_id}", tags=["operations"], response_model=None)
 async def update_task(
     request: Request,
@@ -553,6 +560,12 @@ async def decide_recommendation(
 
 @router.get("/decision-loop/audit", tags=["decision-loop"], response_model=None)
 async def decision_audit(
-    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:read"))]
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+    after: str | None = Query(default=None, max_length=64),
 ) -> dict[str, Any]:
-    return {"items": request.app.state.decision_store.audit(context)}
+    items = request.app.state.decision_store.audit(context)
+    return {
+        "items": [item for item in items if not after or item.get("at", "") > after],
+        "next_after": items[-1].get("at") if items else after,
+    }
