@@ -192,6 +192,14 @@ Verification update: `pytest -q tests/test_evaluation_replay.py` = **2 passed**;
 
 Limitations: metrics are transparent fixture outputs, not measured superiority, accuracy, or operational validation.
 
+## `architecture-acceptance`
+
+**Status:** Verification gate completed; prototype is substantially aligned, MVP is partial, and final district gates remain external.
+
+- `docs/architecture-alignment-final-report.md` maps every Definition of Done criterion to a Pass, Partial, Missing, or Externally blocked result with commands and file/test evidence.
+- Repeated evaluation replay produced identical hash `1bccaf48fc3b74d40419a6c8aff3fcbd64f015e5c9be42d296fd1ae2f735af25`; full documented check passed 73 backend tests and frontend production build.
+- Docker recovery remains externally blocked in this environment; no substitute evidence was invented.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.
