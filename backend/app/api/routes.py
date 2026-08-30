@@ -481,6 +481,13 @@ async def list_jobs(
     return {"items": request.app.state.operations_store.list_jobs(context)}
 
 
+@router.get("/audit/integrity", tags=["operations"], response_model=None)
+async def verify_audit_integrity(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("operations:read"))]
+) -> dict[str, Any]:
+    return request.app.state.operations_store.verify_audit_chain(context)
+
+
 @router.patch("/tasks/{task_id}", tags=["operations"], response_model=None)
 async def update_task(
     request: Request,

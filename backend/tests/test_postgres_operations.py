@@ -90,6 +90,9 @@ def test_postgresql_operations_and_decision_state_are_durable() -> None:
         "recommendation_created",
         "recommendation_approved",
     }
+    integrity = client.get("/api/v1/audit/integrity", headers=_headers(f"integrity-{suffix}"))
+    assert integrity.status_code == 200
+    assert integrity.json()["valid"] is True
 
 
 @pytest.mark.skipif(

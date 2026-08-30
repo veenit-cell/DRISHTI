@@ -153,6 +153,7 @@ class OperationsStore(Protocol):
         idempotency_key: str,
     ) -> dict[str, Any]: ...
     def list_jobs(self, context: RequestContext) -> list[dict[str, Any]]: ...
+    def verify_audit_chain(self, context: RequestContext) -> dict[str, Any]: ...
 
     def reset_for_replay(self, context: RequestContext, now: datetime) -> None: ...
 
@@ -452,6 +453,9 @@ class InMemoryOperationsStore:
     def list_jobs(self, context):
         return []
 
+    def verify_audit_chain(self, context):
+        return {"available": False, "valid": None, "checked": 0}
+
     def reset_for_replay(self, context: RequestContext, now: datetime) -> None:
         self.resources = {
             key: value
@@ -550,7 +554,7 @@ class PostgreSQLOperationsStore:
         now: datetime,
     ) -> None:
         cursor.execute(
-            "SELECT event_hash FROM audit_events WHERE organization_id=%s AND workspace_id=%s ORDER BY recorded_at DESC, id DESC LIMIT 1",
+            "SELECT event_hash FROM audit_events WHERE organization_id=%s AND workspace_id=%s AND event_hash IS NOT NULL ORDER BY chain_sequence DESC LIMIT 1",
             (context.tenant_id, context.workspace_id),
         )
         previous = cursor.fetchone()
@@ -1064,6 +1068,30 @@ class PostgreSQLOperationsStore:
                 }
                 for r in cursor.fetchall()
             ]
+
+    def verify_audit_chain(self, context):
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, action, subject_id, occurred_at, details, previous_hash, event_hash FROM audit_events WHERE organization_id=%s AND workspace_id=%s AND event_hash IS NOT NULL ORDER BY chain_sequence",
+                (context.tenant_id, context.workspace_id),
+            )
+            previous_hash = None
+            checked = 0
+            for event_id, action, subject_id, occurred_at, details, stored_previous, event_hash in cursor:
+                expected_hash = _request_hash(
+                    {
+                        "previous_hash": previous_hash,
+                        "action": action,
+                        "subject_id": subject_id,
+                        "occurred_at": occurred_at.isoformat(),
+                        "details": details,
+                    }
+                )
+                checked += 1
+                if stored_previous != previous_hash or event_hash != expected_hash:
+                    return {"available": True, "valid": False, "checked": checked, "failure_id": event_id}
+                previous_hash = event_hash
+            return {"available": True, "valid": True, "checked": checked}
 
     def reset_for_replay(self, context: RequestContext, now: datetime) -> None:
         with self._connection() as connection, connection.cursor() as cursor:

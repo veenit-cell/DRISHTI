@@ -188,6 +188,18 @@ def test_cors_allows_mutating_api_contract_headers() -> None:
     assert "idempotency-key" in response.headers["access-control-allow-headers"].lower()
 
 
+def test_in_memory_audit_integrity_reports_adapter_limitation() -> None:
+    app = create_app(
+        Settings(app_environment="test", dev_identity_enabled=True),
+        operations_store=InMemoryOperationsStore(),
+    )
+    response = TestClient(app).get(
+        "/api/v1/audit/integrity", headers={"X-Dev-Identity": "operator"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"available": False, "valid": None, "checked": 0}
+
+
 def test_feasibility_surfaces_verification_readiness_and_routes() -> None:
     app = create_app(
         Settings(app_environment="test", dev_identity_enabled=True),

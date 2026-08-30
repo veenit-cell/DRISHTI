@@ -20,6 +20,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.context import RequestContext
+from app.operations import PostgreSQLOperationsStore
 
 
 class SourceInput(BaseModel):
@@ -841,21 +842,14 @@ class PostgreSQLEvidenceStore:
                     recorded_at,
                     {"report_id": report_id, "revision": 1},
                 )
-                cursor.execute(
-                    "INSERT INTO audit_events (id, organization_id, workspace_id, actor_id, action, subject_type, subject_id, correlation_id, occurred_at, recorded_at, details) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                    (
-                        envelope["event_id"],
-                        context.tenant_id,
-                        context.workspace_id,
-                        context.actor_id,
-                        "report.accepted",
-                        "report",
-                        report_id,
-                        context.correlation_id,
-                        recorded_at,
-                        recorded_at,
-                        Jsonb({"warnings": normalized["warnings"]}),
-                    ),
+                PostgreSQLOperationsStore._audit(
+                    cursor,
+                    context,
+                    "report.accepted",
+                    "report",
+                    report_id,
+                    {"warnings": normalized["warnings"]},
+                    recorded_at,
                 )
                 cursor.execute(
                     "INSERT INTO outbox_events (id, organization_id, workspace_id, event_type, aggregate_type, aggregate_id, aggregate_revision, envelope, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
