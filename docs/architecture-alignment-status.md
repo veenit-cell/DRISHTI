@@ -85,6 +85,19 @@ Verification update: `pytest backend/tests/test_decision_policy.py backend/tests
 
 Limitations: resource effects are synthetic policy signals; PostgreSQL recommendation persistence retains the existing schema and does not persist the full candidate set as separate rows.
 
+## `decision-snapshot`
+
+**Status:** Implemented as a scoped, immutable evidence/incident integration adapter.
+
+- `backend/app/decision_snapshot.py` resolves reports, reviewed/contradictory claims, linked incidents, sector assessments, operational observations, and policy version into a canonical snapshot.
+- Each source retains exact ID, revision, event/recorded timestamps, freshness, uncertainty, visible and accepted claims, and source data. Future records are excluded at replay time; out-of-scope records are rejected.
+- Contradictions and unknowns remain visible. Missing decision-critical claims or linked incidents create verification candidates with explicit decision-impact reasons. Synthetic provenance is labeled.
+- `POST /api/v1/decision-snapshot/build` enforces caller tenant/workspace scope and is read-only.
+
+Verification update: `pytest backend/tests/test_decision_snapshot.py -q` = **4 passed**; full suite = **58 passed**; Ruff and diff check passed.
+
+Limitations: this packet does not rewrite evidence/decision persistence or invent a live snapshot store; callers provide already-resolved scoped records.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.

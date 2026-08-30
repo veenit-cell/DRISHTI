@@ -8,6 +8,7 @@ from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
 from app.decision_loop import DecisionNotFoundError, DecisionResponse
 from app.decision_policy import PolicyRequest, evaluate_policy
+from app.decision_snapshot import SnapshotRequest, build_decision_snapshot
 from app.evidence import (
     EvidenceReview,
     IncidentLink,
@@ -392,6 +393,21 @@ async def evaluate_decision_policy(
 ) -> dict[str, Any]:
     del context
     return evaluate_policy(request).model_dump(mode="json")
+
+
+@router.post("/decision-snapshot/build", tags=["decision-loop"], response_model=None)
+async def build_decision_snapshot_path(
+    request: SnapshotRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    if request.tenant_id != context.tenant_id or request.workspace_id != context.workspace_id:
+        raise ApiProblem(
+            status=403,
+            code="SCOPE_DENIED",
+            title="Snapshot scope denied",
+            detail="Snapshot sources must match the caller scope.",
+        )
+    return build_decision_snapshot(request).model_dump(mode="json")
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)
