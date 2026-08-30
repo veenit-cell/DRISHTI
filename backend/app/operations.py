@@ -172,6 +172,7 @@ class InMemoryOperationsStore:
         self.resources: dict[str, dict[str, Any]] = {}
         self.queue: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
+        self.routes: dict[str, dict[str, Any]] = {}
         self._idempotent: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
 
     def _replay_or_record(
@@ -293,8 +294,6 @@ class InMemoryOperationsStore:
             "created_at": now.isoformat(),
         }
         self.queue.setdefault("__routes__", {}) if False else None
-        if not hasattr(self, "routes"):
-            self.routes = {}
         self.routes[record["id"]] = record
         return self._replay_or_record(context, idempotency_key, payload, dict(record))
 
@@ -344,6 +343,16 @@ class InMemoryOperationsStore:
         required = item.get("required_capability")
         if required and required not in resource.get("capabilities", []):
             raise TaskConflictError("resource lacks required capability")
+        if item.get("destination"):
+            observations = [
+                r
+                for r in self.routes.values()
+                if r["workspace_id"] == context.workspace_id
+                and r["destination"] == item["destination"]
+            ]
+            latest = max(observations, key=lambda r: r["observed_at"], default=None)
+            if latest and latest["state"] != "passable":
+                raise TaskConflictError("route is not passable")
         if any(
             task["resource_id"] == resource["id"] and task["status"] != "completed"
             for task in self.tasks.values()
@@ -830,6 +839,13 @@ class PostgreSQLOperationsStore:
                 raise TaskConflictError("resource readiness is expired")
             if queue_row[1] and queue_row[1] not in (resource[2] or []):
                 raise TaskConflictError("resource lacks required capability")
+            cursor.execute(
+                "SELECT state, expires_at FROM route_observations WHERE organization_id=%s AND workspace_id=%s AND destination=(SELECT destination FROM response_queue_items WHERE id=%s) ORDER BY observed_at DESC LIMIT 1",
+                (context.tenant_id, context.workspace_id, queue_id),
+            )
+            route = cursor.fetchone()
+            if route and route[0] != "passable" and (route[1] is None or route[1] > now):
+                raise TaskConflictError("route is not passable")
             try:
                 cursor.execute(
                     "INSERT INTO response_tasks (organization_id, workspace_id, queue_item_id, resource_id, status, approved_by, approved_at) VALUES (%s, %s, %s, %s, 'assigned', %s, %s) RETURNING id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at",

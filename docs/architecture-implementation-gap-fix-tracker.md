@@ -19,3 +19,11 @@ Remaining: direct evidence/incident IDs in recommendation inputs, full field out
 | Operator decision workspace | Demo slice | React now loads resources, queue, tasks, evaluates a recommendation, and exposes commander approve/reject. |
 | Minimal field/offline shell | Shell only | Service worker caches the app shell; no IndexedDB/outbox or sync conflict protocol yet. |
 | Verification workflow linkage | Partial | Verification queue endpoint exists; recommendation approvals create response queue items for explicit task issuance. |
+
+## Following three gaps
+
+| Gap | Status | Evidence |
+|---|---|---|
+| Geospatial feasibility | Improved / demo slice | Task approval rejects a latest non-passable route observation. |
+| Concurrency/recovery proof | Regression covered | No-double-booking remains enforced and the focused route test passes; recovery drill remains open. |
+| Authorization hardening | Regression covered | Scoped write/read dependencies and invalid-input tests remain green. |

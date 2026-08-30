@@ -148,3 +148,37 @@ def test_feasibility_surfaces_verification_readiness_and_routes() -> None:
         ).status_code
         == 201
     )
+
+
+def test_blocked_route_prevents_task_approval() -> None:
+    app = create_app(
+        Settings(app_environment="test", dev_identity_enabled=True),
+        operations_store=InMemoryOperationsStore(),
+        clock=FixedClock(datetime(2026, 8, 30, 10, 30, tzinfo=UTC)),
+    )
+    client = TestClient(app)
+    h = {"X-Dev-Identity": "operator"}
+    client.post("/api/v1/operations/demo/seed", headers={**h, "Idempotency-Key": "s-route"})
+    resource = client.get("/api/v1/resources", headers=h).json()["items"][0]
+    client.post(
+        "/api/v1/route-observations",
+        headers={**h, "Idempotency-Key": "r-route"},
+        json={
+            "destination": "North Sector",
+            "state": "blocked",
+            "observed_at": "2026-08-30T10:30:00Z",
+        },
+    )
+    queue = client.post(
+        "/api/v1/response-queue",
+        headers={**h, "Idempotency-Key": "q-route"},
+        json={"title": "Water", "destination": "North Sector"},
+    ).json()
+    assert (
+        client.post(
+            f"/api/v1/response-queue/{queue['id']}/approve",
+            headers={**h, "Idempotency-Key": "a-route"},
+            json={"resource_id": resource["id"], "approved": True},
+        ).status_code
+        == 409
+    )
