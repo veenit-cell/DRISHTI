@@ -1,7 +1,7 @@
 # ruff: noqa: E501
 
 import copy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -138,6 +138,7 @@ class InMemoryDecisionStore:
             "input_snapshot": signals,
             "input_hash": _request_hash(signals),
             "expected_effect": "protect potable-water continuity before the 3.5 hour runway threshold",
+            "expires_at": (now + timedelta(hours=4)).isoformat(),
             "auto_dispatched": False,
             "created_at": now.isoformat(),
             "workspace_id": context.workspace_id,
@@ -173,6 +174,10 @@ class InMemoryDecisionStore:
         if recommendation is None or recommendation["workspace_id"] != context.workspace_id:
             raise DecisionNotFoundError
         if recommendation["status"] != "pending_approval":
+            raise DecisionNotFoundError
+        if recommendation.get("expires_at") and datetime.fromisoformat(
+            recommendation["expires_at"]
+        ) <= now.astimezone(UTC):
             raise DecisionNotFoundError
         recommendation["status"] = "approved" if response.decision == "approve" else "rejected"
         recommendation["decided_by"] = context.actor_id
@@ -374,6 +379,7 @@ class PostgreSQLDecisionStore:
             "input_snapshot": signals,
             "input_hash": _request_hash(signals),
             "expected_effect": "protect potable-water continuity before the 3.5 hour runway threshold",
+            "expires_at": (now + timedelta(hours=4)).isoformat(),
             "auto_dispatched": False,
             "created_at": now.isoformat(),
         }
@@ -383,7 +389,7 @@ class PostgreSQLDecisionStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "INSERT INTO recommendations (id, organization_id, workspace_id, status, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, auto_dispatched, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, %s)",
+                "INSERT INTO recommendations (id, organization_id, workspace_id, status, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, expires_at, auto_dispatched, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, %s)",
                 (
                     recommendation["id"],
                     context.tenant_id,
@@ -399,6 +405,7 @@ class PostgreSQLDecisionStore:
                     Jsonb(recommendation["input_snapshot"]),
                     recommendation["input_hash"],
                     recommendation["expected_effect"],
+                    now + timedelta(hours=4),
                     now,
                 ),
             )
@@ -433,11 +440,13 @@ class PostgreSQLDecisionStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "SELECT id, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, created_at FROM recommendations WHERE id = %s AND organization_id = %s AND workspace_id = %s AND status = 'pending_approval' FOR UPDATE",
+                "SELECT id, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, expires_at, created_at FROM recommendations WHERE id = %s AND organization_id = %s AND workspace_id = %s AND status = 'pending_approval' FOR UPDATE",
                 (recommendation_id, context.tenant_id, context.workspace_id),
             )
             row = cursor.fetchone()
             if row is None:
+                raise DecisionNotFoundError
+            if row[11] and row[11] <= now:
                 raise DecisionNotFoundError
             status = "approved" if response.decision == "approve" else "rejected"
             cursor.execute(
@@ -493,9 +502,10 @@ class PostgreSQLDecisionStore:
                 "input_snapshot": row[8],
                 "input_hash": row[9],
                 "expected_effect": row[10],
+                "expires_at": row[11].isoformat() if row[11] else None,
                 "queue_item_id": queue_id,
                 "auto_dispatched": False,
-                "created_at": row[11].isoformat(),
+                "created_at": row[12].isoformat(),
                 "decided_by": context.actor_id,
                 "decided_at": now.isoformat(),
                 "decision_note": response.note,
