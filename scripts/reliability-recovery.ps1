@@ -1,6 +1,7 @@
 param(
     [string] $BackupPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts\recovery\ev2-seeded.dump'),
-    [string] $RestoreDatabase = 'ev2_recovery_demo'
+    [string] $RestoreDatabase = 'ev2_recovery_demo',
+    [int] $ApiPort = 8011
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,7 +9,8 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $compose = Join-Path $root 'infra\compose.yaml'
 $python = Join-Path $root '.venv\Scripts\python.exe'
-$api = 'http://127.0.0.1:8000'
+$api = "http://127.0.0.1:$ApiPort"
+$started = Get-Date
 
 if ($RestoreDatabase -notmatch '^ev2_recovery_[a-z0-9_]+$') {
     throw 'RestoreDatabase must match the safe disposable target pattern ev2_recovery_<name>.'
@@ -27,7 +29,7 @@ $server = $null
 try {
     Push-Location backend
     try { & $python -m app.persistence } finally { Pop-Location }
-    $server = Start-Process -FilePath $python -ArgumentList '-m','uvicorn','app.main:app','--host','127.0.0.1','--port','8000' -WorkingDirectory (Join-Path $root 'backend') -WindowStyle Hidden -PassThru
+    $server = Start-Process -FilePath $python -ArgumentList '-m','uvicorn','app.main:app','--host','127.0.0.1','--port',"$ApiPort" -WorkingDirectory (Join-Path $root 'backend') -WindowStyle Hidden -PassThru
     $ready = $false
     1..20 | ForEach-Object {
         if (-not $ready) {
@@ -42,18 +44,31 @@ try {
     $health = Invoke-RestMethod -Method Get -Uri "$api/api/v1/health/ready"
     if ($health.status -ne 'ready') { throw 'Health verification failed.' }
     $audit = Invoke-RestMethod -Method Get -Uri "$api/api/v1/audit/integrity" -Headers @{ 'X-Dev-Identity' = 'operator' }
-    if ($audit.status -notin @('valid', 'empty', 'unavailable')) { throw 'Audit integrity verification failed.' }
+    if ($audit.available -and $audit.valid -ne $true) { throw 'Audit integrity verification failed.' }
 
-    docker compose -f $compose exec -T database pg_dump -U postgres -d ev2 -Fc | Set-Content -Encoding Byte -Path $BackupPath
+    $container = (docker compose -f $compose ps -q database).Trim()
+    if ([string]::IsNullOrWhiteSpace($container)) { throw 'Could not resolve the local Compose database container.' }
+    docker compose -f $compose exec -T database pg_dump -U postgres -d ev2 -Fc -f /tmp/ev2-seeded.dump
+    if ($LASTEXITCODE -ne 0) { throw 'Database backup failed.' }
+    docker cp "${container}:/tmp/ev2-seeded.dump" $BackupPath
+    if ($LASTEXITCODE -ne 0) { throw 'Could not copy the disposable backup out of the container.' }
+    docker compose -f $compose exec -T database rm -f /tmp/ev2-seeded.dump | Out-Null
     # Destructive SQL is permitted only for this explicitly guarded disposable target.
     docker compose -f $compose exec -T database psql -U postgres -d ev2 -c "DROP DATABASE IF EXISTS $RestoreDatabase;" | Out-Null
     docker compose -f $compose exec -T database createdb -U postgres $RestoreDatabase
-    Get-Content -Raw -Encoding Byte $BackupPath | docker compose -f $compose exec -T database pg_restore -U postgres -d $RestoreDatabase --clean --if-exists
+    docker cp $BackupPath "${container}:/tmp/ev2-restore.dump"
+    if ($LASTEXITCODE -ne 0) { throw 'Could not copy the backup into the disposable restore container.' }
+    docker compose -f $compose exec -T database pg_restore -U postgres -d $RestoreDatabase --clean --if-exists /tmp/ev2-restore.dump
+    if ($LASTEXITCODE -ne 0) { throw 'Database restore failed.' }
+    docker compose -f $compose exec -T database rm -f /tmp/ev2-restore.dump | Out-Null
 
-    $counts = docker compose -f $compose exec -T database psql -U postgres -d ev2 -Atc "SELECT 'audit_events='||count(*) FROM audit_events; SELECT 'reports='||count(*) FROM reports;"
-    $restoredCounts = docker compose -f $compose exec -T database psql -U postgres -d $RestoreDatabase -Atc "SELECT 'audit_events='||count(*) FROM audit_events; SELECT 'reports='||count(*) FROM reports;"
+    $query = "SELECT 'audit_events='||count(*) FROM audit_events; SELECT 'raw_reports='||count(*) FROM raw_reports; SELECT 'audit_hash='||md5(COALESCE(string_agg(COALESCE(event_hash,''),'' ORDER BY chain_sequence),'')) FROM audit_events;"
+    $counts = docker compose -f $compose exec -T database psql -U postgres -d ev2 -Atc $query
+    if ($LASTEXITCODE -ne 0) { throw 'Source count/hash query failed.' }
+    $restoredCounts = docker compose -f $compose exec -T database psql -U postgres -d $RestoreDatabase -Atc $query
+    if ($LASTEXITCODE -ne 0) { throw 'Restored count/hash query failed.' }
     if (($counts -join '').Trim() -ne ($restoredCounts -join '').Trim()) { throw 'Restore count comparison failed.' }
-    Write-Output "PASS clean-start seed/replay/health/audit/backup/restore; backup=$BackupPath target=$RestoreDatabase"
+    Write-Output "PASS clean-start seed/replay/health/audit/backup/restore; backup=$BackupPath target=$RestoreDatabase elapsed_seconds=$([math]::Round(((Get-Date)-$started).TotalSeconds,2))"
     Write-Output "COUNTS source=$($counts -join ',') restored=$($restoredCounts -join ',')"
 }
 finally {

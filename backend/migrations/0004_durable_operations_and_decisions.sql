@@ -1,5 +1,14 @@
 -- Phase 1 correction: operational IDs share the text tenant/workspace scope
 -- established by 0001, and active-task exclusion is a partial unique index.
+-- Re-runs must remove dependent RLS policies before changing tenant column types.
+DO $$
+DECLARE table_name text;
+BEGIN
+  FOREACH table_name IN ARRAY ARRAY['resources','response_queue_items','response_tasks'] LOOP
+    EXECUTE format('DROP POLICY IF EXISTS ev2_scope_%s ON %I', table_name, table_name);
+  END LOOP;
+END $$;
+
 ALTER TABLE resources
     ALTER COLUMN organization_id TYPE text USING organization_id::text,
     ALTER COLUMN workspace_id TYPE text USING workspace_id::text;

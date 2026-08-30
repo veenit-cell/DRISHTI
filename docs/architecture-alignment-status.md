@@ -179,7 +179,7 @@ Limitations: polling is the required path; no broker or WebSocket transport is i
 - `scripts/reliability-recovery.ps1` applies migrations, seeds/replays synthetic data, checks readiness and audit integrity, backs up to an explicit repository-local disposable path, restores only to a name matching `ev2_recovery_*`, and compares key counts.
 - `docs/reliability-recovery.md` documents clean start, degraded readiness behavior, manual paper/radio fallback, and the rule that unavailable Docker/PostgreSQL tooling is recorded as unverified.
 
-Verification update: script structure and target guards reviewed; live Docker/PostGIS backup/restore execution is **unverified** when the platform is unavailable. No shared or unresolved database target was touched.
+Verification update: local Docker backup/restore passed; source/restored counts and audit hash matched (718 audit events, 46 raw reports, hash `8a80ebdfac5ad66472b1569ac89e7fd7`). Production monitoring remains out of scope.
 
 ## `evaluation-replay`
 
@@ -198,7 +198,7 @@ Limitations: metrics are transparent fixture outputs, not measured superiority, 
 
 - `docs/architecture-alignment-final-report.md` maps every Definition of Done criterion to a Pass, Partial, Missing, or Externally blocked result with commands and file/test evidence.
 - Repeated evaluation replay produced identical hash `1bccaf48fc3b74d40419a6c8aff3fcbd64f015e5c9be42d296fd1ae2f735af25`; full documented check passed 73 backend tests and frontend production build.
-- Docker recovery remains externally blocked in this environment; no substitute evidence was invented.
+- Docker recovery is now verified locally; production failover/monitoring remains an external gate.
 
 ### Honest limitations
 

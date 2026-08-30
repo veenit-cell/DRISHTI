@@ -9,7 +9,7 @@ Date: 2026-08-30. This report evaluates the prototype against `docs/SYSTEM_ARCHI
 | `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check.ps1` | Pass: Ruff checks, 73 backend tests, TypeScript check and Vite production build. Ruff format reports existing files that would be reformatted but exits successfully; this is recorded as Partial formatting hygiene. |
 | `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\run-evaluation-replay.ps1` (twice) | Pass: 120 visible / 121 total, 1 future record excluded; identical result hash `1bccaf48fc3b74d40419a6c8aff3fcbd64f015e5c9be42d296fd1ae2f735af25`. |
 | `pytest -q tests/test_evaluation_replay.py` | Pass: 2 tests; deterministic replay, future filtering, required signals, lifecycle. |
-| `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\reliability-recovery.ps1` | Externally blocked: Docker engine unavailable; no backup/restore claim made. |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\reliability-recovery.ps1` | Pass: 718 audit events and 46 raw reports backed up/restored; audit hash `8a80ebdfac5ad66472b1569ac89e7fd7` matched; elapsed 6.61s. |
 
 Raw replay evidence is in `artifacts/evaluation-replay/results.json`; comparison is in `artifacts/evaluation-replay/comparison.md`.
 
@@ -34,7 +34,7 @@ Prototype assessment: **90%**. The remaining 10% is integration-test breadth, no
 |---|---|---|
 | Prototype criteria | Partial | See gate above |
 | 50–200 records, bounded media, PostGIS baseline, exports | Partial | 121-record replay; bounded CSV/GeoJSON adapters; PostGIS migrations. No media scanning. |
-| Health metrics, backup/restore, reproducible deployment | Partial / externally blocked | `/health/ready`, `/metrics`, guarded recovery script; Docker recovery could not execute locally |
+| Health metrics, backup/restore, reproducible deployment | Partial | `/health/ready`, `/metrics`, guarded recovery script; local backup/restore passes, deployment remains local-only |
 | Baseline and ablation with raw results | Pass | `artifacts/evaluation-replay/results.json` and `comparison.md` |
 | No autonomous action, hidden original, cross-tenant access, invariant violation known open | Pass | authorization, decision, offline, and operations tests; explicit `auto_dispatched: false` contract |
 | Required algorithm/API/integration sign-offs | Missing | No external Person 1/2/3 sign-off artifacts exist |
@@ -67,6 +67,6 @@ For recovery evidence, run `.scriptseliability-recovery.ps1` only with the loca
 
 ## Honest limitations
 
-Polling is process-local rather than a durable outbox reader; RLS and external OIDC are deployment seams; some frontend intelligence uses labeled fixtures; PostgreSQL backup/restore and concurrency evidence are unverified in this environment. No cloud, production, clinical, partner, or operational-accuracy claim is made.
+Polling is process-local rather than a durable outbox reader; RLS and external OIDC are deployment seams; some frontend intelligence uses labeled fixtures; PostgreSQL concurrency under production load remains unverified. No cloud, production, clinical, partner, or operational-accuracy claim is made.
 
 Self-debug audit: performed (reviewed Definition of Done, commands, status ledger, replay hashes, and format output; no small reproduced product defect found). Additional user inputs: 0. Token consumption: unavailable from runtime.
