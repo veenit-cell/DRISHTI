@@ -3,6 +3,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 
+from app.cascade import CascadeRequest, evaluate_cascade
 from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
 from app.decision_loop import DecisionNotFoundError, DecisionResponse
@@ -362,6 +363,15 @@ async def project_resource_runway(
 ) -> dict[str, Any]:
     del context
     return project_runway(request).model_dump(mode="json")
+
+
+@router.post("/cascade/evaluate", tags=["decision-loop"], response_model=None)
+async def evaluate_cascade_path(
+    request: CascadeRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    del context
+    return evaluate_cascade(request).model_dump(mode="json")
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)

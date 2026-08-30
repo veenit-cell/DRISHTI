@@ -45,6 +45,20 @@ Verification update: `pytest backend/tests -q` = **43 passed**; Ruff, frontend b
 
 Limitations: battery projections require explicit battery capacity and replenishment inputs; cold-chain depletion requires an explicit rate; treatment capacity is reported as context but not assumed to produce potable water without a confirmed transfer.
 
+## `cascade-engine`
+
+**Status:** Implemented as an independently startable, pure `cascade_v1` evaluator.
+
+- `backend/app/cascade.py` accepts a typed snapshot adapter with explicit units, timestamps, freshness, and supporting references.
+- Fixed bounded rules cover power → purification → safe-water runway, power → medicine cold chain, unsafe water + population pressure → operational disease-risk pressure, and rising medical demand → medicine/diagnostic pressure.
+- Findings include severity, optional time window, ordered causal path, references, unknown contributors, confidence, and rule version. Unknown/stale inputs never become safe; they lower confidence and remain visible.
+- `POST /api/v1/cascade/evaluate` evaluates an explicit snapshot under `decision:read` without persistence or operational mutation.
+- Graph validation rejects malformed cycles and paths beyond the four-level bound; output ordering is stable.
+
+Verification update: `pytest backend/tests/test_cascade.py -q` = **4 passed**; `pytest backend/tests -q` = **47 passed**; Ruff and `git diff --check` passed.
+
+Limitations: this is an operational pressure/capability signal, not a clinical diagnosis, forecast, dispatch, or ML model. It uses caller-supplied snapshot fixtures and does not infer missing measurements.
+
 ### Honest limitations
 
 - Synthetic state is not a measured operational baseline and is not medical or safety validation.
