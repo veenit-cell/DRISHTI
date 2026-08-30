@@ -1,7 +1,7 @@
 # ruff: noqa: E501
 
 import copy
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -115,7 +115,12 @@ class InMemoryDecisionStore:
         compatible = [
             resource
             for resource in self.operations_store.list_resources(context)
-            if resource["readiness"] == "ready" and resource["resource_type"] == "water_team"
+            if resource["readiness"] == "ready"
+            and resource["resource_type"] == "water_team"
+            and (
+                not resource.get("readiness_expires_at")
+                or datetime.fromisoformat(resource["readiness_expires_at"]) > now.astimezone(UTC)
+            )
         ]
         recommendation = {
             "id": _opaque_id("rec"),
@@ -158,6 +163,8 @@ class InMemoryDecisionStore:
             return self._replay_or_record(context, idempotency_key, payload, {})
         recommendation = self.recommendations.get(recommendation_id)
         if recommendation is None or recommendation["workspace_id"] != context.workspace_id:
+            raise DecisionNotFoundError
+        if recommendation["status"] != "pending_approval":
             raise DecisionNotFoundError
         recommendation["status"] = "approved" if response.decision == "approve" else "rejected"
         recommendation["decided_by"] = context.actor_id
@@ -317,7 +324,12 @@ class PostgreSQLDecisionStore:
         compatible = [
             resource
             for resource in self.operations_store.list_resources(context)
-            if resource["readiness"] == "ready" and resource["resource_type"] == "water_team"
+            if resource["readiness"] == "ready"
+            and resource["resource_type"] == "water_team"
+            and (
+                not resource.get("readiness_expires_at")
+                or datetime.fromisoformat(resource["readiness_expires_at"]) > now.astimezone(UTC)
+            )
         ]
         recommendation = {
             "id": _opaque_id("rec"),

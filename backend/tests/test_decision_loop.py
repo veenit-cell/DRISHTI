@@ -36,6 +36,14 @@ def test_replay_recommendation_and_explicit_decision() -> None:
         json={"decision": "approve", "note": "Commander confirms water priority"},
     )
     assert decision.status_code == 200 and decision.json()["status"] == "approved"
+    assert (
+        client.post(
+            f"/api/v1/decision-loop/recommendations/{body['id']}/decision",
+            headers=headers("decision-002"),
+            json={"decision": "reject"},
+        ).status_code
+        == 404
+    )
     assert client.get("/api/v1/tasks", headers=headers("read-001")).json()["items"] == []
     assert (
         client.post("/api/v1/decision-loop/demo/replay", headers=headers("replay-002")).json()[

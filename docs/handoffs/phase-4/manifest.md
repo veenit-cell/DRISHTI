@@ -5,3 +5,5 @@ Implemented a fixed synthetic replay scenario and one explainable recommendation
 APIs: `POST /api/v1/decision-loop/demo/replay` resets/replays the fixed scenario and operations state; `GET /api/v1/decision-loop/scenario` reads it; `POST /api/v1/decision-loop/recommendations` evaluates the rule; `POST /api/v1/decision-loop/recommendations/{id}/decision` records commander `approve` or `reject`.
 
 Approval is explicit and never auto-dispatches or creates a task. The complete demo-path test proves replay, explainability, compatible-resource filtering, approval, and no automatic task creation. ML, solver optimization, WebSockets, and full offline synchronization remain deferred.
+
+Hardening correction: recommendation compatibility now excludes expired readiness observations, and a recommendation can only be decided once (pending approval). These guards are covered by regression tests.
