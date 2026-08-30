@@ -32,6 +32,35 @@ from app.persistence import database_ready
 router = APIRouter()
 
 
+def _validate_queue_sources(
+    request: Request, context: RequestContext, item: QueueItemCreate
+) -> None:
+    """Require queue provenance to resolve inside the caller's current scope."""
+    if item.source_report_id:
+        try:
+            request.app.state.evidence_store.get_report(context, item.source_report_id)
+        except ReportNotFoundError:
+            raise ApiProblem(
+                status=404,
+                code="QUEUE_SOURCE_REPORT_NOT_FOUND",
+                title="Queue source report not found",
+                detail="The source report is not available in the current tenant/workspace scope.",
+            ) from None
+    if item.source_incident_id:
+        incident_ids = {
+            incident["id"] for incident in request.app.state.evidence_store.list_incidents(context)
+        }
+        if item.source_incident_id not in incident_ids:
+            raise ApiProblem(
+                status=404,
+                code="QUEUE_SOURCE_INCIDENT_NOT_FOUND",
+                title="Queue source incident not found",
+                detail=(
+                    "The source incident is not available in the current tenant/workspace scope."
+                ),
+            )
+
+
 @router.get("/health/live", tags=["system"])
 async def health_live() -> dict[str, str]:
     return {"status": "ok"}
@@ -320,6 +349,7 @@ async def create_response_queue(
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ) -> dict[str, Any]:
+    _validate_queue_sources(request, context, item)
     try:
         return request.app.state.operations_store.create_queue(
             context, item, request.app.state.clock.now(), idempotency_key
@@ -347,6 +377,7 @@ async def create_verification_queue(
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
 ):
+    _validate_queue_sources(request, context, item)
     try:
         return request.app.state.operations_store.create_queue(
             context,

@@ -10,7 +10,7 @@ import {
   readReport,
   readReports,
   seedDemo,
-  createRecommendation, decideRecommendation, readOps, OpsItem,
+  createRecommendation, decideRecommendation, readOps, OpsItem, recordTaskOutcome,
 } from "./api";
 
 type LoadState =
@@ -28,6 +28,7 @@ export function App() {
   const [placeText, setPlaceText] = useState("Synthetic North Sector");
   const [ops, setOps] = useState<{ resources: OpsItem[]; queue: OpsItem[]; tasks: OpsItem[] }>({ resources: [], queue: [], tasks: [] });
   const [recommendation, setRecommendation] = useState<OpsItem | null>(null);
+  const [outcomeText, setOutcomeText] = useState("");
 
   async function refreshEvidence() {
     setWorkbenchError(null);
@@ -68,6 +69,12 @@ export function App() {
   }
 
   async function handleRecommendation() { const next = await createRecommendation(); setRecommendation(next); }
+  async function handleOutcome(taskId: string) {
+    if (!outcomeText.trim()) return;
+    await recordTaskOutcome(taskId, outcomeText.trim());
+    setOutcomeText("");
+    setOps(await readOps());
+  }
 
   async function handleCreate() {
     setBusy(true);
@@ -215,7 +222,7 @@ export function App() {
       </section>
       <section className="workbench" aria-labelledby="ops-title">
         <div className="workbench-heading"><div><p className="eyebrow">Decision workspace · offline-ready shell</p><h2 id="ops-title">Observe, recommend, approve, then task explicitly.</h2></div><button type="button" onClick={() => void handleRecommendation()}>Evaluate water priority</button></div>
-        <div className="workbench-grid"><div className="panel"><h3>Resources</h3>{ops.resources.map((r) => <p key={r.id}><strong>{r.name}</strong> {r.status}</p>)}</div><div className="panel"><h3>Queue / tasks</h3><p>{ops.queue.length} queued · {ops.tasks.length} active tasks</p></div><div className="panel"><h3>Recommendation</h3>{recommendation ? <><p><strong>{recommendation.action}</strong></p><p>{recommendation.reasons?.join(" · ")}</p><button type="button" onClick={() => void decideRecommendation(recommendation.id, "approve").then(setRecommendation)}>Commander approve</button> <button type="button" onClick={() => void decideRecommendation(recommendation.id, "reject").then(setRecommendation)}>Reject</button></> : <p className="muted">Run the deterministic rule to inspect its reasons.</p>}</div></div>
+        <div className="workbench-grid"><div className="panel"><h3>Resources</h3>{ops.resources.map((r) => <p key={r.id}><strong>{r.name}</strong> {r.status}</p>)}</div><div className="panel"><h3>Queue / tasks</h3><p>{ops.queue.length} queued · {ops.tasks.length} tasks</p>{ops.tasks.filter((task) => task.status === "completed").map((task) => <div key={task.id}><p>{task.outcome_summary ? `Outcome: ${task.outcome_summary}` : "Completed: record field outcome"}</p>{!task.outcome_summary && <><input aria-label="Task outcome" value={outcomeText} onChange={(event) => setOutcomeText(event.target.value)} placeholder="Observed result" /><button type="button" onClick={() => void handleOutcome(task.id)}>Record outcome</button></>}</div>)}</div><div className="panel"><h3>Recommendation</h3>{recommendation ? <><p><strong>{recommendation.action}</strong></p><p>{recommendation.reasons?.join(" · ")}</p><button type="button" onClick={() => void decideRecommendation(recommendation.id, "approve").then(setRecommendation)}>Commander approve</button> <button type="button" onClick={() => void decideRecommendation(recommendation.id, "reject").then(setRecommendation)}>Reject</button></> : <p className="muted">Run the deterministic rule to inspect its reasons.</p>}</div></div>
       </section>
     </main>
   );

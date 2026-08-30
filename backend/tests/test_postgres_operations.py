@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -89,3 +90,47 @@ def test_postgresql_operations_and_decision_state_are_durable() -> None:
         "recommendation_created",
         "recommendation_approved",
     }
+
+
+@pytest.mark.skipif(
+    not database_ready(Settings().database_url),
+    reason="local PostgreSQL/PostGIS integration profile is not running",
+)
+def test_postgresql_concurrent_approvals_do_not_double_book_a_resource() -> None:
+    app = create_app(
+        Settings(app_environment="test", dev_identity_enabled=True),
+        clock=FixedClock(datetime(2026, 8, 30, 10, 30, tzinfo=UTC)),
+    )
+    client = TestClient(app)
+    suffix = uuid4().hex
+    replay = client.post(
+        "/api/v1/decision-loop/demo/replay", headers=_headers(f"replay-{suffix}")
+    )
+    assert replay.status_code == 200
+    resource = next(
+        item
+        for item in client.get(
+            "/api/v1/resources", headers=_headers(f"resources-{suffix}")
+        ).json()["items"]
+        if item["readiness"] == "ready"
+    )
+    queues = [
+        client.post(
+            "/api/v1/response-queue",
+            headers=_headers(f"queue-{index}-{suffix}"),
+            json={"title": f"Concurrent water action {index}"},
+        ).json()
+        for index in range(2)
+    ]
+
+    def approve(index: int) -> int:
+        with TestClient(app) as worker:
+            return worker.post(
+                f"/api/v1/response-queue/{queues[index]['id']}/approve",
+                headers=_headers(f"approve-{index}-{suffix}"),
+                json={"resource_id": resource["id"], "approved": True},
+            ).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        statuses = sorted(executor.map(approve, range(2)))
+    assert statuses == [200, 409]

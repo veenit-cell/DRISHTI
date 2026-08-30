@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.core.clock import FixedClock
 from app.core.config import Settings
+from app.evidence import InMemoryEvidenceStore
 from app.main import create_app
 from app.operations import InMemoryOperationsStore
 
@@ -112,6 +113,54 @@ def test_operations_write_idempotency_and_task_transition_guards() -> None:
         ).status_code
         == 409
     )
+
+
+def test_queue_provenance_must_resolve_in_current_scope() -> None:
+    app = create_app(
+        Settings(app_environment="test", dev_identity_enabled=True),
+        evidence_store=InMemoryEvidenceStore(),
+        operations_store=InMemoryOperationsStore(),
+        clock=FixedClock(datetime(2026, 8, 30, 10, 30, tzinfo=UTC)),
+    )
+    client = TestClient(app)
+    headers = {"X-Dev-Identity": "operator", "Idempotency-Key": "source-001"}
+    missing = client.post(
+        "/api/v1/response-queue",
+        headers=headers,
+        json={"title": "Trace water concern", "source_report_id": "rpt_missing"},
+    )
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "QUEUE_SOURCE_REPORT_NOT_FOUND"
+
+    report = client.post(
+        "/api/v1/reports",
+        headers={"X-Dev-Identity": "operator", "Idempotency-Key": "rpt-source-001"},
+        json={
+            "contract_version": 1,
+            "client_record_id": "rpt-source-001",
+            "source": {"channel": "test", "source_class": "synthetic"},
+            "report_type": "water_contamination",
+            "facts": {"access_state": "unknown"},
+            "privacy_class": "restricted_operational",
+        },
+    ).json()
+    created = client.post(
+        "/api/v1/response-queue",
+        headers={"X-Dev-Identity": "operator", "Idempotency-Key": "source-002"},
+        json={"title": "Trace water concern", "source_report_id": report["report_id"]},
+    )
+    assert created.status_code == 201
+    assert created.json()["source_report_id"] == report["report_id"]
+
+    assert client.post("/api/v1/demo/seed", headers=headers).status_code == 200
+    incident = client.get("/api/v1/incidents", headers=headers).json()["items"][0]
+    incident_queue = client.post(
+        "/api/v1/verification-queue",
+        headers={"X-Dev-Identity": "operator", "Idempotency-Key": "source-003"},
+        json={"title": "Verify incident", "source_incident_id": incident["id"]},
+    )
+    assert incident_queue.status_code == 201
+    assert incident_queue.json()["source_incident_id"] == incident["id"]
 
 
 def test_feasibility_surfaces_verification_readiness_and_routes() -> None:
