@@ -10,6 +10,7 @@ import {
   readReport,
   readReports,
   seedDemo,
+  createRecommendation, decideRecommendation, readOps, OpsItem,
 } from "./api";
 
 type LoadState =
@@ -25,6 +26,8 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [reportType, setReportType] = useState("water_contamination");
   const [placeText, setPlaceText] = useState("Synthetic North Sector");
+  const [ops, setOps] = useState<{ resources: OpsItem[]; queue: OpsItem[]; tasks: OpsItem[] }>({ resources: [], queue: [], tasks: [] });
+  const [recommendation, setRecommendation] = useState<OpsItem | null>(null);
 
   async function refreshEvidence() {
     setWorkbenchError(null);
@@ -50,6 +53,7 @@ export function App() {
         }
     });
     void refreshEvidence();
+    void readOps().then(setOps).catch(() => undefined);
     return () => controller.abort();
   }, []);
 
@@ -62,6 +66,8 @@ export function App() {
       setBusy(false);
     }
   }
+
+  async function handleRecommendation() { const next = await createRecommendation(); setRecommendation(next); }
 
   async function handleCreate() {
     setBusy(true);
@@ -206,6 +212,10 @@ export function App() {
             )}
           </div>
         </div>
+      </section>
+      <section className="workbench" aria-labelledby="ops-title">
+        <div className="workbench-heading"><div><p className="eyebrow">Decision workspace · offline-ready shell</p><h2 id="ops-title">Observe, recommend, approve, then task explicitly.</h2></div><button type="button" onClick={() => void handleRecommendation()}>Evaluate water priority</button></div>
+        <div className="workbench-grid"><div className="panel"><h3>Resources</h3>{ops.resources.map((r) => <p key={r.id}><strong>{r.name}</strong> {r.status}</p>)}</div><div className="panel"><h3>Queue / tasks</h3><p>{ops.queue.length} queued · {ops.tasks.length} active tasks</p></div><div className="panel"><h3>Recommendation</h3>{recommendation ? <><p><strong>{recommendation.action}</strong></p><p>{recommendation.reasons?.join(" · ")}</p><button type="button" onClick={() => void decideRecommendation(recommendation.id, "approve").then(setRecommendation)}>Commander approve</button> <button type="button" onClick={() => void decideRecommendation(recommendation.id, "reject").then(setRecommendation)}>Reject</button></> : <p className="muted">Run the deterministic rule to inspect its reasons.</p>}</div></div>
       </section>
     </main>
   );

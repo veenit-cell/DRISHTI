@@ -11,3 +11,11 @@ Updated: 30 August 2026
 | Commander approval linked to tasking | Partial / explicit | Approval accepts an optional compatible `resource_id`, records `queue_item_id`, and never auto-dispatches; task creation remains a separate authorized action. |
 
 Remaining: direct evidence/incident IDs in recommendation inputs, full field outcomes, alternatives/exclusions, expiry enforcement, and operator UI.
+
+## Next three gaps
+
+| Gap | Status | Evidence |
+|---|---|---|
+| Operator decision workspace | Demo slice | React now loads resources, queue, tasks, evaluates a recommendation, and exposes commander approve/reject. |
+| Minimal field/offline shell | Shell only | Service worker caches the app shell; no IndexedDB/outbox or sync conflict protocol yet. |
+| Verification workflow linkage | Partial | Verification queue endpoint exists; recommendation approvals create response queue items for explicit task issuance. |

@@ -81,6 +81,10 @@ export async function readApiStatus(signal?: AbortSignal): Promise<ApiStatus> {
 }
 
 const operatorHeaders = { "X-Dev-Identity": "operator" };
+export type OpsItem = { id: string; name?: string; title?: string; status?: string; resource_id?: string; queue_item_id?: string; action?: string; sector?: string; reasons?: string[]; compatible_resources?: Array<{ id: string; name: string }> };
+export async function readOps(): Promise<{ resources: OpsItem[]; queue: OpsItem[]; tasks: OpsItem[] }> { const [resources, queue, tasks] = await Promise.all([requestJson<{ items: OpsItem[] }>("/api/v1/resources"), requestJson<{ items: OpsItem[] }>("/api/v1/response-queue"), requestJson<{ items: OpsItem[] }>("/api/v1/tasks")]); return { resources: resources.items, queue: queue.items, tasks: tasks.items }; }
+export async function createRecommendation(): Promise<OpsItem> { return requestJson<OpsItem>("/api/v1/decision-loop/recommendations", { method: "POST", headers: { "Idempotency-Key": `ui-rec-${crypto.randomUUID()}` } }); }
+export async function decideRecommendation(id: string, decision: "approve" | "reject"): Promise<OpsItem> { return requestJson<OpsItem>(`/api/v1/decision-loop/recommendations/${id}/decision`, { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": `ui-dec-${crypto.randomUUID()}` }, body: JSON.stringify({ decision }) }); }
 
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
   const response = await fetch(input, {
