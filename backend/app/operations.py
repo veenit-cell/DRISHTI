@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.context import RequestContext
+from app.plans import PlanStore
 
 
 class ResourceCreate(BaseModel):
@@ -41,6 +42,18 @@ class QueueItemCreate(BaseModel):
     source_incident_id: str | None = Field(default=None, max_length=128)
 
 
+class MissionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_report_id: str = Field(min_length=1, max_length=128)
+    source_incident_id: str = Field(min_length=1, max_length=128)
+    objective: str = Field(min_length=1, max_length=160)
+    destination: str | None = Field(default=None, max_length=120)
+    priority: str = Field(default="high", pattern="^(low|normal|high|critical)$")
+    required_capability: str | None = Field(default=None, max_length=80)
+    owner_actor_id: str | None = Field(default=None, max_length=128)
+
+
 class ResourceReadinessUpdate(BaseModel):
     readiness: str = Field(pattern="^(ready|not_ready|unknown)$")
     observed_at: datetime
@@ -66,12 +79,22 @@ class TaskApproval(BaseModel):
 class TaskStatusUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: str = Field(pattern="^(assigned|acknowledged|en_route|completed)$")
+    status: str = Field(pattern="^(assigned|acknowledged|en_route|on_scene|paused|completed)$")
 
 
 class TaskOutcome(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str = Field(min_length=1, max_length=1000)
+
+
+class StructuredTaskOutcome(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_type_evidence: str = Field(min_length=1, max_length=160)
+    completion_quantities: dict[str, float] = Field(default_factory=dict, max_length=20)
+    completed_at: datetime
+    residual_need: str | None = Field(default=None, max_length=500)
+    verified_by: str = Field(min_length=1, max_length=128)
 
 
 class ResourceNotFoundError(Exception):
@@ -152,6 +175,14 @@ class OperationsStore(Protocol):
         now: datetime,
         idempotency_key: str,
     ) -> dict[str, Any]: ...
+    def record_structured_outcome(
+        self,
+        context: RequestContext,
+        task_id: str,
+        outcome: StructuredTaskOutcome,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]: ...
     def list_jobs(self, context: RequestContext) -> list[dict[str, Any]]: ...
     def verify_audit_chain(self, context: RequestContext) -> dict[str, Any]: ...
 
@@ -187,12 +218,13 @@ def _task_record(row: tuple[Any, ...]) -> dict[str, Any]:
 class InMemoryOperationsStore:
     """Fast deterministic test adapter. Application runtime uses PostgreSQLOperationsStore."""
 
-    def __init__(self) -> None:
+    def __init__(self, plan_store: PlanStore | None = None) -> None:
         self.resources: dict[str, dict[str, Any]] = {}
         self.queue: dict[str, dict[str, Any]] = {}
         self.tasks: dict[str, dict[str, Any]] = {}
         self.routes: dict[str, dict[str, Any]] = {}
         self._idempotent: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
+        self.plan_store = plan_store
 
     def _replay_or_record(
         self, context: RequestContext, key: str, payload: Any, result: dict[str, Any]
@@ -263,11 +295,18 @@ class InMemoryOperationsStore:
         resource = self.resources.get(resource_id)
         if resource is None or resource["workspace_id"] != context.workspace_id:
             raise ResourceNotFoundError
+        readiness_changed = resource["readiness"] != update.readiness or resource.get(
+            "readiness_expires_at"
+        ) != _iso(update.expires_at)
         resource.update(
             readiness=update.readiness,
             readiness_observed_at=update.observed_at.isoformat(),
             readiness_expires_at=_iso(update.expires_at),
         )
+        if readiness_changed and self.plan_store:
+            self.plan_store.invalidate_subject(
+                context, "resource", resource_id, "readiness_expiry", now
+            )
         return self._replay_or_record(context, idempotency_key, payload, dict(resource))
 
     def create_queue(
@@ -314,6 +353,13 @@ class InMemoryOperationsStore:
         }
         self.queue.setdefault("__routes__", {}) if False else None
         self.routes[record["id"]] = record
+        if self.plan_store and (
+            observation.state != "passable"
+            or (observation.expires_at and observation.expires_at <= now)
+        ):
+            self.plan_store.invalidate_subject(
+                context, "route", observation.destination, "route_expiry", now
+            )
         return self._replay_or_record(context, idempotency_key, payload, dict(record))
 
     def list_route_observations(self, context):
@@ -415,9 +461,12 @@ class InMemoryOperationsStore:
         transitions = {
             "assigned": "acknowledged",
             "acknowledged": "en_route",
-            "en_route": "completed",
+            "en_route": {"on_scene", "paused"},
+            "on_scene": {"completed", "paused"},
+            "paused": "en_route",
         }
-        if transitions.get(task["status"]) != status:
+        allowed = transitions.get(task["status"])
+        if status not in (allowed if isinstance(allowed, set) else {allowed}):
             raise TaskConflictError(f"cannot change task from {task['status']} to {status}")
         task["status"] = status
         task["updated_at"] = now.isoformat()
@@ -450,6 +499,41 @@ class InMemoryOperationsStore:
         task["outcome_recorded_at"] = now.isoformat()
         return self._replay_or_record(context, idempotency_key, payload, dict(task))
 
+    def record_structured_outcome(self, context, task_id, outcome, now, idempotency_key):
+        payload = {
+            "operation": "task.structured_outcome.v1",
+            "task_id": task_id,
+            "outcome": outcome.model_dump(mode="json"),
+        }
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            return self._replay_or_record(context, idempotency_key, payload, {})
+        task = self.tasks.get(task_id)
+        if task is None or task["workspace_id"] != context.workspace_id:
+            raise TaskNotFoundError
+        if task["status"] != "completed":
+            raise TaskConflictError("structured outcome requires completion")
+        quantities = {
+            key: value for key, value in outcome.completion_quantities.items() if value >= 0
+        }
+        if len(quantities) != len(outcome.completion_quantities):
+            raise TaskConflictError("completion quantities cannot be negative")
+        task.update(
+            completion_evidence=outcome.action_type_evidence,
+            completion_quantities=quantities,
+            residual_need=outcome.residual_need,
+            completed_at=outcome.completed_at.isoformat(),
+            verified_by=outcome.verified_by,
+            outcome_summary=outcome.action_type_evidence,
+            outcome_recorded_at=now.isoformat(),
+        )
+        resource = self.resources.get(task["resource_id"])
+        if resource is not None:
+            resource["capacity_value"] = round(
+                float(resource.get("capacity_value") or 0) + sum(quantities.values()), 6
+            )
+        return self._replay_or_record(context, idempotency_key, payload, dict(task))
+
     def list_jobs(self, context):
         return []
 
@@ -480,8 +564,9 @@ class InMemoryOperationsStore:
 class PostgreSQLOperationsStore:
     """Durable operations state. PostgreSQL owns all shared runtime state."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, plan_store: PlanStore | None = None) -> None:
         self.database_url = database_url
+        self.plan_store = plan_store
 
     def _connection(self) -> psycopg.Connection[Any]:
         return psycopg.connect(self.database_url)
@@ -682,6 +767,13 @@ class PostgreSQLOperationsStore:
             if existing is not None:
                 return existing
             cursor.execute(
+                "SELECT readiness, readiness_expires_at FROM resources WHERE id=%s AND organization_id=%s AND workspace_id=%s FOR UPDATE",
+                (resource_id, context.tenant_id, context.workspace_id),
+            )
+            previous = cursor.fetchone()
+            if previous is None:
+                raise ResourceNotFoundError
+            cursor.execute(
                 "UPDATE resources SET readiness=%s, readiness_observed_at=%s, readiness_expires_at=%s WHERE id=%s AND organization_id=%s AND workspace_id=%s RETURNING id, name, resource_type, readiness, location, capabilities, readiness_observed_at, readiness_expires_at, created_at",
                 (
                     update.readiness,
@@ -715,6 +807,12 @@ class PostgreSQLOperationsStore:
                 {"readiness": update.readiness},
                 now,
             )
+            if self.plan_store and (
+                previous[0] != update.readiness or previous[1] != update.expires_at
+            ):
+                self.plan_store.invalidate_subject(
+                    context, "resource", resource_id, "readiness_expiry", now
+                )
             self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
             return response
 
@@ -842,6 +940,13 @@ class PostgreSQLOperationsStore:
                 {"destination": observation.destination, "state": observation.state},
                 now,
             )
+            if self.plan_store and (
+                observation.state != "passable"
+                or (observation.expires_at and observation.expires_at <= now)
+            ):
+                self.plan_store.invalidate_subject(
+                    context, "route", observation.destination, "route_expiry", now
+                )
             self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
             return response
 
@@ -985,9 +1090,12 @@ class PostgreSQLOperationsStore:
             transitions = {
                 "assigned": "acknowledged",
                 "acknowledged": "en_route",
-                "en_route": "completed",
+                "en_route": {"on_scene", "paused"},
+                "on_scene": {"completed", "paused"},
+                "paused": "en_route",
             }
-            if transitions.get(task[3]) != status:
+            allowed = transitions.get(task[3])
+            if status not in (allowed if isinstance(allowed, set) else {allowed}):
                 raise TaskConflictError(f"cannot change task from {task[3]} to {status}")
             cursor.execute(
                 "UPDATE response_tasks SET status = %s, updated_at = %s WHERE id = %s RETURNING id, queue_item_id, resource_id, status, approved_by, approved_at, updated_at",
@@ -1051,6 +1159,64 @@ class PostgreSQLOperationsStore:
             self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
             return response
 
+    def record_structured_outcome(self, context, task_id, outcome, now, idempotency_key):
+        payload = {
+            "operation": "task.structured_outcome.v1",
+            "task_id": task_id,
+            "outcome": outcome.model_dump(mode="json"),
+        }
+        with self._connection() as connection, connection.cursor() as cursor:
+            self._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
+            cursor.execute(
+                "SELECT queue_item_id,resource_id,status FROM response_tasks WHERE id=%s AND organization_id=%s AND workspace_id=%s FOR UPDATE",
+                (task_id, context.tenant_id, context.workspace_id),
+            )
+            task = cursor.fetchone()
+            if task is None:
+                raise TaskNotFoundError
+            if task[2] != "completed":
+                raise TaskConflictError("structured outcome requires completion")
+            quantities = {
+                key: value for key, value in outcome.completion_quantities.items() if value >= 0
+            }
+            if len(quantities) != len(outcome.completion_quantities):
+                raise TaskConflictError("completion quantities cannot be negative")
+            cursor.execute(
+                "UPDATE response_tasks SET completion_evidence=%s,completion_quantities=%s,residual_need=%s,completed_at=%s,verified_by=%s,outcome_summary=%s,outcome_recorded_at=%s WHERE id=%s",
+                (
+                    outcome.action_type_evidence,
+                    Jsonb(quantities),
+                    outcome.residual_need,
+                    outcome.completed_at,
+                    outcome.verified_by,
+                    outcome.action_type_evidence,
+                    now,
+                    task_id,
+                ),
+            )
+            cursor.execute(
+                "UPDATE resources SET capacity_value=COALESCE(capacity_value,0)+%s WHERE id=%s AND organization_id=%s AND workspace_id=%s",
+                (sum(quantities.values()), task[1], context.tenant_id, context.workspace_id),
+            )
+            response = {
+                "task_id": task_id,
+                "queue_item_id": str(task[0]),
+                "completion_evidence": outcome.action_type_evidence,
+                "completion_quantities": quantities,
+                "residual_need": outcome.residual_need,
+                "completed_at": _iso(outcome.completed_at),
+                "verified_by": outcome.verified_by,
+                "outcome_recorded_at": _iso(now),
+            }
+            self._audit(
+                cursor, context, "task.structured_outcome_recorded", "task", task_id, response, now
+            )
+            self._record_idempotency(cursor, context, idempotency_key, payload, response, now)
+            return response
+
     def list_jobs(self, context):
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -1077,7 +1243,15 @@ class PostgreSQLOperationsStore:
             )
             previous_hash = None
             checked = 0
-            for event_id, action, subject_id, occurred_at, details, stored_previous, event_hash in cursor:
+            for (
+                event_id,
+                action,
+                subject_id,
+                occurred_at,
+                details,
+                stored_previous,
+                event_hash,
+            ) in cursor:
                 expected_hash = _request_hash(
                     {
                         "previous_hash": previous_hash,
@@ -1089,7 +1263,12 @@ class PostgreSQLOperationsStore:
                 )
                 checked += 1
                 if stored_previous != previous_hash or event_hash != expected_hash:
-                    return {"available": True, "valid": False, "checked": checked, "failure_id": event_id}
+                    return {
+                        "available": True,
+                        "valid": False,
+                        "checked": checked,
+                        "failure_id": event_id,
+                    }
                 previous_hash = event_hash
             return {"available": True, "valid": True, "checked": checked}
 

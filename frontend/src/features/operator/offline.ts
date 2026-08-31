@@ -1,4 +1,4 @@
-export type OfflineCommand = { command_id: string; aggregate_id: string; sequence: number; kind: "report" | "acknowledgement" | "en_route" | "completion" | "route_observation" | "outcome"; client_timestamp: string; payload: Record<string, unknown>; tenant_id: string; workspace_id: string };
+export type OfflineCommand = { command_id: string; aggregate_id: string; sequence: number; kind: "report" | "acknowledgement" | "en_route" | "on_scene" | "paused" | "completion" | "route_observation" | "outcome"; client_timestamp: string; payload: Record<string, unknown>; tenant_id: string; workspace_id: string };
 
 const DB_NAME = "shelter-field-pwa";
 const STORE = "outbox";
@@ -16,6 +16,13 @@ function openDb(): Promise<IDBDatabase> {
 export async function queueCommand(command: OfflineCommand): Promise<void> {
   const db = await openDb();
   await new Promise<void>((resolve, reject) => { const tx = db.transaction(STORE, "readwrite"); tx.objectStore(STORE).put(command); tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error ?? new Error("Outbox write failed")); });
+}
+
+export async function queueTaskUpdate(taskId: string, status: "acknowledged" | "en_route" | "on_scene" | "paused" | "completed", payload: Record<string, unknown> = {}): Promise<void> {
+  const pending = await readOutbox();
+  const sequence = Math.max(0, ...pending.filter((command) => command.aggregate_id === taskId).map((command) => command.sequence)) + 1;
+  const kind = status === "acknowledged" ? "acknowledgement" : status === "completed" ? "completion" : status;
+  await queueCommand({ command_id: `offline-${taskId}-${sequence}-${Date.now()}`, aggregate_id: taskId, sequence, kind, client_timestamp: new Date().toISOString(), payload: { status, ...payload }, tenant_id: "org_demo", workspace_id: "evt_demo" });
 }
 
 export async function readOutbox(): Promise<OfflineCommand[]> {

@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from app.core.context import RequestContext
 from app.operations import PostgreSQLOperationsStore
+from app.plans import PlanStore
 
 
 class SourceInput(BaseModel):
@@ -223,6 +224,10 @@ class EvidenceStore(Protocol):
         self, context: RequestContext, report_id: str, link: IncidentLink, linked_at: datetime
     ) -> dict[str, Any]: ...
 
+    def link_command_incident(
+        self, context: RequestContext, report_id: str, incident_id: str, linked_at: datetime
+    ) -> dict[str, Any]: ...
+
     def list_incidents(self, context: RequestContext) -> list[dict[str, Any]]: ...
 
     def list_sectors(self, context: RequestContext) -> list[dict[str, Any]]: ...
@@ -343,13 +348,15 @@ def _feature_collection(
 class InMemoryEvidenceStore:
     """Deterministic test adapter; production/dev application uses PostgreSQLEvidenceStore."""
 
-    def __init__(self) -> None:
+    def __init__(self, plan_store: PlanStore | None = None) -> None:
         self._lock = Lock()
         self._reports: dict[str, dict[str, Any]] = {}
         self._keys: dict[tuple[str, str, str], str] = {}
         self._incidents: dict[str, dict[str, Any]] = {}
         self._sectors: dict[str, dict[str, Any]] = {}
         self._links: set[tuple[str, str]] = set()
+        self._command_links: dict[str, list[dict[str, Any]]] = {}
+        self.plan_store = plan_store
 
     def create_report(
         self, context: RequestContext, report: ReportCreate, recorded_at: datetime
@@ -430,7 +437,9 @@ class InMemoryEvidenceStore:
             or record["workspace_id"] != context.workspace_id
         ):
             raise ReportNotFoundError
-        return copy.deepcopy(record)
+        detail = copy.deepcopy(record)
+        detail["command_incident_links"] = copy.deepcopy(self._command_links.get(report_id, []))
+        return detail
 
     def seed_demo(self, context: RequestContext, recorded_at: datetime) -> int:
         now = _utc_iso(recorded_at)
@@ -548,6 +557,11 @@ class InMemoryEvidenceStore:
         record["reviewed_by"] = context.actor_id
         record["reviewed_at"] = _utc_iso(reviewed_at)
         record["review_note"] = review.note
+        if self.plan_store:
+            for claim_id in review.claim_updates:
+                self.plan_store.invalidate_subject(
+                    context, "claim", claim_id, "claim_revision", reviewed_at
+                )
         return copy.deepcopy(record)
 
     def link_incident(
@@ -567,6 +581,20 @@ class InMemoryEvidenceStore:
             "linked_at": _utc_iso(linked_at),
         }
 
+    def link_command_incident(self, context, report_id, incident_id, linked_at):
+        report = self.get_report(context, report_id)
+        link = {
+            "report_id": report["id"],
+            "incident_id": incident_id,
+            "linked_by": context.actor_id,
+            "linked_at": _utc_iso(linked_at),
+        }
+        with self._lock:
+            links = self._command_links.setdefault(report_id, [])
+            if not any(existing["incident_id"] == incident_id for existing in links):
+                links.append(link)
+        return copy.deepcopy(link)
+
     def list_incidents(self, context: RequestContext) -> list[dict[str, Any]]:
         return [
             copy.deepcopy(value)
@@ -583,8 +611,9 @@ class InMemoryEvidenceStore:
 
 
 class PostgreSQLEvidenceStore:
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, plan_store: PlanStore | None = None) -> None:
         self.database_url = database_url
+        self.plan_store = plan_store
 
     def _connection(self) -> psycopg.Connection[Any]:
         return psycopg.connect(self.database_url)
@@ -625,6 +654,11 @@ class PostgreSQLEvidenceStore:
                 "UPDATE raw_reports SET status = 'reviewed', reviewed_by = %s, reviewed_at = %s, review_note = %s, revision = revision + 1 WHERE id = %s",
                 (context.actor_id, reviewed_at, review.note, report_id),
             )
+            if self.plan_store:
+                for claim_id in review.claim_updates:
+                    self.plan_store.invalidate_subject(
+                        context, "claim", claim_id, "claim_revision", reviewed_at
+                    )
         return self.get_report(context, report_id)
 
     def link_incident(
@@ -657,6 +691,32 @@ class PostgreSQLEvidenceStore:
         return {
             "report_id": report_id,
             "incident_id": link.incident_id,
+            "linked_by": context.actor_id,
+            "linked_at": _utc_iso(linked_at),
+        }
+
+    def link_command_incident(self, context, report_id, incident_id, linked_at):
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM raw_reports WHERE id=%s AND organization_id=%s AND workspace_id=%s",
+                (report_id, context.tenant_id, context.workspace_id),
+            )
+            if cursor.fetchone() is None:
+                raise ReportNotFoundError
+            cursor.execute(
+                "INSERT INTO report_command_incident_links (report_id,incident_id,organization_id,workspace_id,linked_by,linked_at) VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                (
+                    report_id,
+                    incident_id,
+                    context.tenant_id,
+                    context.workspace_id,
+                    context.actor_id,
+                    linked_at,
+                ),
+            )
+        return {
+            "report_id": report_id,
+            "incident_id": incident_id,
             "linked_by": context.actor_id,
             "linked_at": _utc_iso(linked_at),
         }
@@ -948,6 +1008,19 @@ class PostgreSQLEvidenceStore:
                     {"candidate_report_id": item[0], "reason": item[1]}
                     for item in cursor.fetchall()
                 ]
+                cursor.execute(
+                    "SELECT incident_id, linked_by, linked_at FROM report_command_incident_links WHERE report_id=%s ORDER BY linked_at, incident_id",
+                    (report_id,),
+                )
+                command_incident_links = [
+                    {
+                        "report_id": report_id,
+                        "incident_id": item[0],
+                        "linked_by": item[1],
+                        "linked_at": _utc_iso(item[2]),
+                    }
+                    for item in cursor.fetchall()
+                ]
         return {
             "id": row[0],
             "tenant_id": context.tenant_id,
@@ -978,6 +1051,7 @@ class PostgreSQLEvidenceStore:
             else None,
             "claims": claims,
             "duplicate_candidates": duplicate_candidates,
+            "command_incident_links": command_incident_links,
         }
 
     def seed_demo(self, context: RequestContext, recorded_at: datetime) -> int:

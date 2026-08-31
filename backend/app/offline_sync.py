@@ -9,7 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 MAX_BATCH = 20
-CommandKind = Literal["report", "acknowledgement", "en_route", "completion", "route_observation", "outcome"]
+CommandKind = Literal["report", "acknowledgement", "en_route", "on_scene", "paused", "completion", "route_observation", "outcome"]
 
 
 class OfflineCommand(BaseModel):

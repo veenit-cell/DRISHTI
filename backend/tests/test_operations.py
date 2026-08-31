@@ -52,7 +52,7 @@ def test_tasking_requires_approval_and_prevents_double_booking() -> None:
         ).status_code
         == 409
     )
-    for status in ("acknowledged", "en_route", "completed"):
+    for status in ("acknowledged", "en_route", "on_scene", "completed"):
         assert (
             client.patch(
                 f"/api/v1/tasks/{first.json()['id']}",

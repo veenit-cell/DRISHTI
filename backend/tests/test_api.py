@@ -6,7 +6,10 @@ from pydantic import ValidationError
 
 from app.core.clock import FixedClock
 from app.core.config import Settings
+from app.core.context import RequestContext
+from app.evidence import InMemoryEvidenceStore
 from app.main import create_app
+from app.operations import InMemoryOperationsStore
 
 
 @pytest.fixture
@@ -72,3 +75,14 @@ def test_fixed_clock_requires_timezone() -> None:
 def test_production_configuration_rejects_development_identity() -> None:
     with pytest.raises(ValidationError):
         Settings(app_environment="production", dev_identity_enabled=True)
+
+
+def test_development_without_database_uses_in_memory_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.main.database_ready", lambda _url: False)
+    app = create_app(Settings(app_environment="development", dev_identity_enabled=True))
+    context = RequestContext("operator", "operator", "org_demo", "evt_demo", frozenset(), "test")
+    assert isinstance(app.state.operations_store, InMemoryOperationsStore)
+    assert isinstance(app.state.evidence_store, InMemoryEvidenceStore)
+    assert app.state.evidence_store.map_features(context, 100, None)["features"] == []

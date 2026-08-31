@@ -18,6 +18,7 @@ from app.decision_policy import (
     ResourceAdapter,
     evaluate_policy,
 )
+from app.dependencies import DependencyStore
 from app.operations import (
     IdempotencyConflictError,
     OperationsStore,
@@ -26,6 +27,7 @@ from app.operations import (
     _opaque_id,
     _request_hash,
 )
+from app.plans import PlanActionCreate, PlanAssumptionCreate, PlanCreate, PlanStore
 
 
 class DecisionResponse(BaseModel):
@@ -34,17 +36,82 @@ class DecisionResponse(BaseModel):
     decision: str = Field(pattern="^(approve|reject)$")
     note: str | None = Field(default=None, max_length=500)
     resource_id: str | None = None
+    selected_action: str | None = Field(default=None, max_length=160)
 
 
 class DecisionNotFoundError(Exception):
     pass
 
 
+def _unlock_candidate(unlock: dict[str, Any], expires_at: str, input_hash: str) -> dict[str, Any]:
+    return {
+        "action": unlock["action"],
+        "evidence_references": unlock["evidence_refs"],
+        "reasons": [f"restoration unlocks {', '.join(unlock['missions_unlocked'])}"],
+        "resource_cost": {"restoration": unlock["restoration_cost"]},
+        "expected_benefit": unlock["missions_unlocked"],
+        "time_sensitivity_hours": None,
+        "confidence": "medium",
+        "expires_at": expires_at,
+        "policy_version": unlock["version"],
+        "input_hash": input_hash,
+        "excluded_resources": {},
+        "expected_operational_effect": f"restoring {unlock['target_node_id']} unlocks downstream missions",
+        "feasible": True,
+        "rank": 0,
+        "status": "pending_approval",
+    }
+
+
+def _persist_alternative_plans(
+    plan_store: PlanStore | None,
+    context: RequestContext,
+    recommendation: dict[str, Any],
+    now: datetime,
+) -> list[str]:
+    if plan_store is None:
+        return []
+    plan_ids = []
+    for candidate in recommendation.get("candidates", [])[:2]:
+        action_class = "unlock" if candidate["action"].startswith("restore_") else "response"
+        plan = plan_store.create_plan(
+            context,
+            PlanCreate(
+                objective_summary=recommendation["expected_effect"],
+                policy_version=recommendation["rule"],
+                horizon_hours=4,
+                actions=[
+                    PlanActionCreate(
+                        action_class=action_class,
+                        action_type=candidate["action"],
+                        expected_effect=candidate["expected_operational_effect"],
+                    )
+                ],
+                assumptions=[
+                    PlanAssumptionCreate(
+                        subject_type="route",
+                        subject_id=recommendation["sector"],
+                        expected_state="passable",
+                        sensitivity="high",
+                        valid_until=datetime.fromisoformat(recommendation["expires_at"]),
+                    )
+                ],
+                input_snapshot_hash=recommendation["input_hash"],
+                expires_at=datetime.fromisoformat(recommendation["expires_at"]),
+            ),
+            now,
+        )
+        plan_ids.append(plan["plan_id"])
+    return plan_ids
+
+
 class InMemoryDecisionStore:
     """Fast deterministic test adapter. Application runtime uses PostgreSQLDecisionStore."""
 
-    def __init__(self, operations_store: OperationsStore) -> None:
+    def __init__(self, operations_store: OperationsStore, dependency_store: DependencyStore | None = None, plan_store: PlanStore | None = None) -> None:
         self.operations_store = operations_store
+        self.dependency_store = dependency_store
+        self.plan_store = plan_store
         self.scenarios: dict[str, dict[str, Any]] = {}
         self.recommendations: dict[str, dict[str, Any]] = {}
         self.audit_events: list[dict[str, Any]] = []
@@ -181,6 +248,16 @@ class InMemoryDecisionStore:
             )
         )
         recommendation["candidates"] = [item.model_dump(mode="json") for item in policy.candidates]
+        if self.dependency_store is not None:
+            for unlock in self.dependency_store.unlock_ranking(context):
+                if unlock["mission_unlock_value"] <= 0:
+                    continue
+                candidate = _unlock_candidate(unlock, recommendation["expires_at"], recommendation["input_hash"])
+                candidate["rank"] = len(recommendation["candidates"]) + 1
+                recommendation["candidates"].append(candidate)
+        recommendation["plan_ids"] = _persist_alternative_plans(
+            self.plan_store, context, recommendation, now
+        )
         self.recommendations[recommendation["id"]] = recommendation
         self.audit_events.append(
             {
@@ -223,27 +300,46 @@ class InMemoryDecisionStore:
         recommendation["decision_note"] = response.note
         recommendation["auto_dispatched"] = False
         if response.decision == "approve":
-            chosen = response.resource_id or (
-                recommendation["compatible_resources"][0]["id"]
-                if recommendation["compatible_resources"]
-                else None
-            )
-            if chosen is None or chosen not in {
-                r["id"] for r in recommendation["compatible_resources"]
-            }:
+            selected_action = response.selected_action or recommendation["candidates"][0]["action"]
+            selected = next((item for item in recommendation["candidates"] if item["action"] == selected_action), None)
+            if selected is None:
                 raise DecisionNotFoundError
-            queue = self.operations_store.create_queue(
-                context,
-                QueueItemCreate(
-                    title=recommendation["action"],
-                    priority="critical",
-                    destination=recommendation["sector"],
-                    required_capability="water_delivery",
-                ),
-                now,
-                f"recommendation-queue-{recommendation_id}",
-            )
-            recommendation["queue_item_id"] = queue["id"]
+            recommendation["selected_action"] = selected_action
+            if selected_action.startswith("restore_"):
+                queue = self.operations_store.create_queue(
+                    context,
+                    QueueItemCreate(
+                        title=selected_action,
+                        priority="high",
+                        destination=recommendation["sector"],
+                        required_capability="infrastructure_restoration",
+                    ),
+                    now,
+                    f"recommendation-queue-{recommendation_id}",
+                )
+                recommendation["queue_item_id"] = queue["id"]
+            else:
+                chosen = response.resource_id or (
+                    recommendation["compatible_resources"][0]["id"]
+                    if recommendation["compatible_resources"]
+                    else None
+                )
+                if chosen is None or chosen not in {
+                    r["id"] for r in recommendation["compatible_resources"]
+                }:
+                    raise DecisionNotFoundError
+                queue = self.operations_store.create_queue(
+                    context,
+                    QueueItemCreate(
+                        title=recommendation["action"],
+                        priority="critical",
+                        destination=recommendation["sector"],
+                        required_capability="water_delivery",
+                    ),
+                    now,
+                    f"recommendation-queue-{recommendation_id}",
+                )
+                recommendation["queue_item_id"] = queue["id"]
         self.audit_events.append(
             {
                 "event": f"recommendation_{recommendation['status']}",
@@ -262,9 +358,17 @@ class InMemoryDecisionStore:
 
 
 class PostgreSQLDecisionStore:
-    def __init__(self, database_url: str, operations_store: PostgreSQLOperationsStore) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        operations_store: PostgreSQLOperationsStore,
+        dependency_store: DependencyStore | None = None,
+        plan_store: PlanStore | None = None,
+    ) -> None:
         self.database_url = database_url
         self.operations_store = operations_store
+        self.dependency_store = dependency_store
+        self.plan_store = plan_store
 
     def _connection(self) -> psycopg.Connection[Any]:
         return psycopg.connect(self.database_url)
@@ -421,13 +525,25 @@ class PostgreSQLDecisionStore:
             "auto_dispatched": False,
             "created_at": now.isoformat(),
         }
+        recommendation["candidates"] = []
+        if self.dependency_store is not None:
+            for unlock in self.dependency_store.unlock_ranking(context):
+                if unlock["mission_unlock_value"] > 0:
+                    candidate = _unlock_candidate(
+                        unlock, recommendation["expires_at"], recommendation["input_hash"]
+                    )
+                    candidate["rank"] = len(recommendation["candidates"]) + 1
+                    recommendation["candidates"].append(candidate)
+        recommendation["plan_ids"] = _persist_alternative_plans(
+            self.plan_store, context, recommendation, now
+        )
         with self._connection() as connection, connection.cursor() as cursor:
             PostgreSQLOperationsStore._ensure_context(cursor, context, now)
             existing = self._idempotent(cursor, context, idempotency_key, payload)
             if existing is not None:
                 return existing
             cursor.execute(
-                "INSERT INTO recommendations (id, organization_id, workspace_id, status, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, expires_at, auto_dispatched, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, %s)",
+                "INSERT INTO recommendations (id, organization_id, workspace_id, status, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, expires_at, candidates, auto_dispatched, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, false, %s)",
                 (
                     recommendation["id"],
                     context.tenant_id,
@@ -444,6 +560,7 @@ class PostgreSQLDecisionStore:
                     recommendation["input_hash"],
                     recommendation["expected_effect"],
                     now + timedelta(hours=4),
+                    Jsonb(recommendation["candidates"]),
                     now,
                 ),
             )
@@ -478,7 +595,7 @@ class PostgreSQLDecisionStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "SELECT id, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, expires_at, created_at FROM recommendations WHERE id = %s AND organization_id = %s AND workspace_id = %s AND status = 'pending_approval' FOR UPDATE",
+                "SELECT id, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, expires_at, created_at, candidates FROM recommendations WHERE id = %s AND organization_id = %s AND workspace_id = %s AND status = 'pending_approval' FOR UPDATE",
                 (recommendation_id, context.tenant_id, context.workspace_id),
             )
             row = cursor.fetchone()
@@ -494,19 +611,33 @@ class PostgreSQLDecisionStore:
             queue_id = None
             if response.decision == "approve":
                 resources = row[3] or []
-                chosen = response.resource_id or (resources[0]["id"] if resources else None)
-                if chosen is None or chosen not in {r["id"] for r in resources}:
-                    raise DecisionNotFoundError
+                candidates = row[13] or []
+                if response.selected_action and response.selected_action.startswith("restore_"):
+                    selected = next(
+                        (item for item in candidates if item["action"] == response.selected_action),
+                        None,
+                    )
+                    if selected is None:
+                        raise DecisionNotFoundError
+                    required_capability = "infrastructure_restoration"
+                    title = selected["action"]
+                else:
+                    chosen = response.resource_id or (resources[0]["id"] if resources else None)
+                    if chosen is None or chosen not in {r["id"] for r in resources}:
+                        raise DecisionNotFoundError
+                    required_capability = "water_delivery"
+                    title = row[1]
                 queue_id = str(uuid4())
                 cursor.execute(
-                    "INSERT INTO response_queue_items (id, organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, status, created_at) VALUES (%s,%s,%s,%s,'critical',%s,%s,'response','water_delivery','queued',%s)",
+                    "INSERT INTO response_queue_items (id, organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, status, created_at) VALUES (%s,%s,%s,%s,'critical',%s,%s,'response',%s,'queued',%s)",
                     (
                         queue_id,
                         context.tenant_id,
                         context.workspace_id,
-                        row[1],
+                        title,
                         row[2],
                         f"from recommendation {recommendation_id}",
+                        required_capability,
                         now,
                     ),
                 )
@@ -533,6 +664,7 @@ class PostgreSQLDecisionStore:
                 "action": row[1],
                 "sector": row[2],
                 "compatible_resources": row[3],
+                "candidates": row[13] or [],
                 "reasons": row[4],
                 "rule": row[5],
                 "priority": row[6],

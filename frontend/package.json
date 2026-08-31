@@ -9,13 +9,16 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@types/leaflet": "^1.9.22",
+    "leaflet": "^1.9.4",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "react-leaflet": "^5.0.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "4.7.0",
     "@types/react": "19.1.10",
     "@types/react-dom": "19.1.7",
+    "@vitejs/plugin-react": "4.7.0",
     "typescript": "5.9.2",
     "vite": "7.3.6"
   }

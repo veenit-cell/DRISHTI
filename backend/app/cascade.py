@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.dependencies import legacy_dependency_graph
+
 RULE_VERSION = "cascade_v1"
 MAX_DEPTH = 4
 
@@ -23,13 +25,7 @@ _UNITS = {
     "medicine_runway_hours": "hours",
 }
 
-DEPENDENCY_GRAPH = {
-    "power": ["water_purification", "medicine_cold_chain"],
-    "water_purification": ["safe_water_runway"],
-    "unsafe_water": ["operational_disease_risk_pressure"],
-    "population_pressure": ["operational_disease_risk_pressure"],
-    "medical_demand": ["medicine_diagnostic_pressure"],
-}
+DEPENDENCY_GRAPH = legacy_dependency_graph()
 
 
 class CascadeSnapshot(BaseModel):

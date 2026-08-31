@@ -9,9 +9,21 @@ from fastapi.responses import JSONResponse
 from app.cascade import CascadeRequest, evaluate_cascade
 from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
+from app.coverage import (
+    CoverageCellCreate,
+    CoverageConflictError,
+    CoverageNotFoundError,
+    CoverageObservationCreate,
+)
 from app.decision_loop import DecisionNotFoundError, DecisionResponse
 from app.decision_policy import PolicyRequest, evaluate_policy
 from app.decision_snapshot import SnapshotRequest, build_decision_snapshot
+from app.dependencies import (
+    DependencyConflictError,
+    InfraDependencyCreate,
+    InfraNodeCreate,
+)
+from app.evaluation_replay import run_replay
 from app.evidence import (
     EvidenceReview,
     IncidentLink,
@@ -21,14 +33,35 @@ from app.evidence import (
     ReportNotFoundError,
 )
 from app.import_export import ImportRequest, export_redacted_csv, export_sitrep, import_fixture
+from app.incident_command import (
+    CommandRoleAssignment,
+    IncidentConflictError,
+    IncidentCreate,
+    IncidentTransition,
+    SectorCreate,
+)
+from app.incident_command import (
+    IncidentNotFoundError as CommandIncidentNotFoundError,
+)
+from app.mutual_aid import (
+    ForecastRequest,
+    MutualAidApproval,
+    MutualAidConflictError,
+    MutualAidNotFoundError,
+    MutualAidRequestCreate,
+    compute_forecast,
+    draft_mutual_aid_request,
+)
 from app.offline_sync import SyncBatch
 from app.operations import (
     IdempotencyConflictError,
+    MissionCreate,
     QueueItemCreate,
     QueueItemNotFoundError,
     ResourceNotFoundError,
     ResourceReadinessUpdate,
     RouteObservationCreate,
+    StructuredTaskOutcome,
     TaskApproval,
     TaskConflictError,
     TaskNotFoundError,
@@ -36,6 +69,14 @@ from app.operations import (
     TaskStatusUpdate,
 )
 from app.persistence import database_ready
+from app.pilot_readiness import (
+    OfficialFeedEnvelope,
+    PilotConfigCreate,
+    PilotConflictError,
+    retention_preview,
+    run_tabletop_exercise,
+)
+from app.plans import CertificateCreate, PlanConflictError, PlanCreate, PlanNotFoundError
 from app.runway import RunwayRequest, project_runway
 from app.shelter_state import (
     ShelterConflictError,
@@ -49,6 +90,501 @@ from app.what_if import WhatIfRequest, evaluate_what_if
 router = APIRouter()
 
 
+@router.post("/command/incidents", tags=["command"], status_code=201, response_model=None)
+async def create_command_incident(
+    request: Request,
+    incident: IncidentCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.incident_store.create_incident(
+            context, incident, request.app.state.clock.now()
+        )
+    except IncidentConflictError as exc:
+        raise ApiProblem(
+            status=409, code="INCIDENT_CONFLICT", title="Incident conflict", detail=str(exc)
+        ) from None
+
+
+@router.get("/command/incidents", tags=["command"], response_model=None)
+async def list_command_incidents(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:read"))]
+) -> dict[str, Any]:
+    return {"items": request.app.state.incident_store.list_incidents(context)}
+
+
+@router.get("/command/incidents/active", tags=["command"], response_model=None)
+async def get_active_command_incident(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("decision:read"))]
+) -> dict[str, Any]:
+    return {"incident": request.app.state.incident_store.get_active_incident(context)}
+
+
+@router.patch("/command/incidents/{incident_id}", tags=["command"], response_model=None)
+async def transition_command_incident(
+    request: Request,
+    incident_id: str,
+    update: IncidentTransition,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.incident_store.transition(
+            context, incident_id, update, request.app.state.clock.now()
+        )
+    except CommandIncidentNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="INCIDENT_NOT_FOUND",
+            title="Incident not found",
+            detail="The incident is outside the current scope.",
+        ) from None
+    except IncidentConflictError as exc:
+        raise ApiProblem(
+            status=409,
+            code="INCIDENT_CONFLICT",
+            title="Incident transition conflict",
+            detail=str(exc),
+        ) from None
+
+
+@router.post("/command/incidents/{incident_id}/roles", tags=["command"], response_model=None)
+async def assign_command_role(
+    request: Request,
+    incident_id: str,
+    assignment: CommandRoleAssignment,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.incident_store.assign_role(
+            context, incident_id, assignment, request.app.state.clock.now()
+        )
+    except CommandIncidentNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="INCIDENT_NOT_FOUND",
+            title="Incident not found",
+            detail="The incident is outside the current scope.",
+        ) from None
+
+
+@router.post(
+    "/command/incidents/{incident_id}/sectors",
+    tags=["command"],
+    status_code=201,
+    response_model=None,
+)
+async def create_incident_sector(
+    request: Request,
+    incident_id: str,
+    sector: SectorCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.incident_store.create_sector(
+            context, incident_id, sector, request.app.state.clock.now()
+        )
+    except CommandIncidentNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="INCIDENT_NOT_FOUND",
+            title="Incident not found",
+            detail="The incident is outside the current scope.",
+        ) from None
+    except IncidentConflictError as exc:
+        raise ApiProblem(
+            status=409, code="SECTOR_CONFLICT", title="Sector conflict", detail=str(exc)
+        ) from None
+
+
+@router.get("/command/incidents/{incident_id}/sectors", tags=["command"], response_model=None)
+async def list_incident_sectors(
+    request: Request,
+    incident_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    try:
+        return {"items": request.app.state.incident_store.list_sectors(context, incident_id)}
+    except CommandIncidentNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="INCIDENT_NOT_FOUND",
+            title="Incident not found",
+            detail="The incident is outside the current scope.",
+        ) from None
+    except IncidentConflictError as exc:
+        raise ApiProblem(
+            status=409, code="INCIDENT_CONFLICT", title="Incident command conflict", detail=str(exc)
+        ) from None
+
+
+@router.post("/resource-forecasts", tags=["mutual-aid"], response_model=None)
+async def create_resource_forecast(
+    request: Request,
+    forecast_request: ForecastRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    created = request.app.state.mutual_aid_store.create_forecast(
+        context, forecast_request, request.app.state.clock.now()
+    )
+    forecast = compute_forecast(forecast_request)
+    draft = draft_mutual_aid_request(forecast, forecast_request, request.app.state.clock.now())
+    if draft:
+        created["draft_request"] = request.app.state.mutual_aid_store.create_request(
+            context, MutualAidRequestCreate(**draft), request.app.state.clock.now()
+        )
+    return created
+
+
+@router.get("/resource-forecasts", tags=["mutual-aid"], response_model=None)
+async def list_resource_forecasts(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    return {"items": request.app.state.mutual_aid_store.list_forecasts(context)}
+
+
+@router.get("/resource-requests", tags=["mutual-aid"], response_model=None)
+async def list_resource_requests(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    return {"items": request.app.state.mutual_aid_store.list_requests(context)}
+
+
+@router.patch("/resource-requests/{request_id}/approve", tags=["mutual-aid"], response_model=None)
+async def approve_resource_request(
+    request: Request,
+    request_id: str,
+    approval: MutualAidApproval,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.mutual_aid_store.approve_request(
+            context, request_id, approval, request.app.state.clock.now()
+        )
+    except MutualAidNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="RESOURCE_REQUEST_NOT_FOUND",
+            title="Resource request not found",
+            detail="The request is outside the current scope.",
+        ) from None
+    except MutualAidConflictError as exc:
+        raise ApiProblem(
+            status=409,
+            code="RESOURCE_REQUEST_CONFLICT",
+            title="Resource request conflict",
+            detail=str(exc),
+        ) from None
+
+
+@router.post("/plans", tags=["plans"], status_code=201, response_model=None)
+async def create_plan(
+    request: Request,
+    plan: PlanCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    return request.app.state.plan_store.create_plan(context, plan, request.app.state.clock.now())
+
+
+@router.get("/plans", tags=["plans"], response_model=None)
+async def list_plans(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+    status: str | None = Query(default=None, max_length=32),
+) -> dict[str, Any]:
+    return {"items": request.app.state.plan_store.list_plans(context, status)}
+
+
+@router.get("/plans/{plan_id}", tags=["plans"], response_model=None)
+async def get_plan(
+    request: Request,
+    plan_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.plan_store.get_plan(context, plan_id)
+    except PlanNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="PLAN_NOT_FOUND",
+            title="Plan not found",
+            detail="The plan is not available in the current scope.",
+        ) from None
+
+
+@router.post("/plans/{plan_id}/check-assumptions", tags=["plans"], response_model=None)
+async def check_plan_assumptions(
+    request: Request,
+    plan_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return {
+            "items": request.app.state.plan_store.check_assumptions(
+                context, plan_id, request.app.state.clock.now()
+            )
+        }
+    except PlanNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="PLAN_NOT_FOUND",
+            title="Plan not found",
+            detail="The plan is not available in the current scope.",
+        ) from None
+
+
+@router.post("/plans/{plan_id}/invalidate", tags=["plans"], response_model=None)
+async def invalidate_plan(
+    request: Request,
+    plan_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    trigger_type: str = Query(
+        default="manual", pattern=r"^(claim_revision|route_expiry|readiness_expiry|manual)$"
+    ),
+    trigger_ref: str = Query(..., min_length=1, max_length=160),
+) -> dict[str, Any]:
+    try:
+        return request.app.state.plan_store.invalidate_plan(
+            context, plan_id, trigger_type, trigger_ref, request.app.state.clock.now()
+        )
+    except PlanNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="PLAN_NOT_FOUND",
+            title="Plan not found",
+            detail="The plan is not available in the current scope.",
+        ) from None
+    except PlanConflictError:
+        raise ApiProblem(
+            status=409,
+            code="PLAN_INVALIDATION_CONFLICT",
+            title="Plan invalidation conflict",
+            detail="The trigger does not match a named plan assumption.",
+        ) from None
+
+
+@router.post("/decision-certificates", tags=["plans"], status_code=201, response_model=None)
+async def create_decision_certificate(
+    request: Request,
+    certificate: CertificateCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.plan_store.create_certificate(
+            context, certificate, request.app.state.clock.now()
+        )
+    except PlanNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="PLAN_NOT_FOUND",
+            title="Plan not found",
+            detail="The selected plan is not available in the current scope.",
+        ) from None
+    except PlanConflictError:
+        raise ApiProblem(
+            status=409,
+            code="CERTIFICATE_CONFLICT",
+            title="Certificate conflict",
+            detail="The selected plan is not approvable.",
+        ) from None
+
+
+@router.get("/decision-certificates/{certificate_id}", tags=["plans"], response_model=None)
+async def get_decision_certificate(
+    request: Request,
+    certificate_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.plan_store.get_certificate(context, certificate_id)
+    except PlanNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="CERTIFICATE_NOT_FOUND",
+            title="Certificate not found",
+            detail="The certificate is not available in the current scope.",
+        ) from None
+
+
+@router.post("/infrastructure/nodes", tags=["infrastructure"], status_code=201, response_model=None)
+async def create_infrastructure_node(
+    request: Request,
+    node: InfraNodeCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.dependency_store.create_node(
+            context, node, request.app.state.clock.now()
+        )
+    except DependencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="INFRASTRUCTURE_NODE_CONFLICT",
+            title="Infrastructure node conflict",
+            detail="The node already exists with different immutable data.",
+        ) from None
+
+
+@router.get("/infrastructure/nodes", tags=["infrastructure"], response_model=None)
+async def list_infrastructure_nodes(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    return {"items": request.app.state.dependency_store.list_nodes(context)}
+
+
+@router.post(
+    "/infrastructure/dependencies", tags=["infrastructure"], status_code=201, response_model=None
+)
+async def create_infrastructure_dependency(
+    request: Request,
+    dependency: InfraDependencyCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.dependency_store.create_dependency(
+            context, dependency, request.app.state.clock.now()
+        )
+    except DependencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="INVALID_DEPENDENCY",
+            title="Invalid infrastructure dependency",
+            detail="The edge references an unknown node or would violate the bounded DAG.",
+        ) from None
+
+
+@router.get("/infrastructure/dependencies", tags=["infrastructure"], response_model=None)
+async def list_infrastructure_dependencies(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    return {"items": request.app.state.dependency_store.list_dependencies(context)}
+
+
+@router.get("/infrastructure/unlock-ranking", tags=["infrastructure"], response_model=None)
+async def infrastructure_unlock_ranking(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    return {
+        "items": request.app.state.dependency_store.unlock_ranking(context),
+        "version": "dependency_dag_v1",
+    }
+
+
+@router.post("/coverage/cells", tags=["coverage"], status_code=201, response_model=None)
+async def create_coverage_cell(
+    request: Request,
+    cell: CoverageCellCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.coverage_store.create_cell(
+            context, cell, request.app.state.clock.now()
+        )
+    except CoverageConflictError:
+        raise ApiProblem(
+            status=409,
+            code="COVERAGE_CELL_CONFLICT",
+            title="Coverage cell conflict",
+            detail="The cell ID already exists with different immutable data.",
+        ) from None
+
+
+@router.get("/coverage/cells", tags=["coverage"], response_model=None)
+async def list_coverage_cells(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, Any]:
+    return {
+        "items": request.app.state.coverage_store.list_cells(context, request.app.state.clock.now())
+    }
+
+
+@router.get("/coverage/cells/{cell_id}", tags=["coverage"], response_model=None)
+async def get_coverage_cell(
+    request: Request,
+    cell_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.coverage_store.get_cell(
+            context, cell_id, request.app.state.clock.now()
+        )
+    except CoverageNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="COVERAGE_CELL_NOT_FOUND",
+            title="Coverage cell not found",
+            detail="The coverage cell is not available in the current scope.",
+        ) from None
+
+
+@router.post(
+    "/coverage/cells/{cell_id}/observations",
+    tags=["coverage"],
+    status_code=201,
+    response_model=None,
+)
+async def create_coverage_observation(
+    request: Request,
+    cell_id: str,
+    observation: CoverageObservationCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.coverage_store.create_observation(
+            context, cell_id, observation, request.app.state.clock.now(), idempotency_key
+        )
+    except CoverageNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="COVERAGE_CELL_NOT_FOUND",
+            title="Coverage cell not found",
+            detail="The coverage cell is not available in the current scope.",
+        ) from None
+    except CoverageConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different observation.",
+        ) from None
+
+
+@router.get("/coverage/cells/{cell_id}/observations", tags=["coverage"], response_model=None)
+async def list_coverage_observations(
+    request: Request,
+    cell_id: str,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, Any]:
+    try:
+        return {"items": request.app.state.coverage_store.list_observations(context, cell_id)}
+    except CoverageNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="COVERAGE_CELL_NOT_FOUND",
+            title="Coverage cell not found",
+            detail="The coverage cell is not available in the current scope.",
+        ) from None
+
+
+@router.get("/coverage/verification-ranking", tags=["coverage"], response_model=None)
+async def coverage_verification_ranking(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
+) -> dict[str, Any]:
+    return {
+        "items": request.app.state.coverage_store.verification_ranking(
+            context, request.app.state.clock.now()
+        ),
+        "version": "decision_impact_v1",
+    }
+
+
 @router.get("/updates", tags=["operations"], response_model=None)
 async def poll_updates(
     request: Request,
@@ -57,15 +593,113 @@ async def poll_updates(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, Any]:
     try:
-        return request.app.state.update_feed.poll(context.tenant_id, context.workspace_id, cursor, limit)
+        return request.app.state.update_feed.poll(
+            context.tenant_id, context.workspace_id, cursor, limit
+        )
     except ValueError:
-        raise ApiProblem(status=422, code="INVALID_UPDATE_CURSOR", title="Invalid update cursor", detail="The update cursor is malformed.") from None
+        raise ApiProblem(
+            status=422,
+            code="INVALID_UPDATE_CURSOR",
+            title="Invalid update cursor",
+            detail="The update cursor is malformed.",
+        ) from None
 
 
 @router.get("/metrics", tags=["system"], response_model=None)
-async def metrics(request: Request, context: Annotated[RequestContext, Depends(require_scopes("system:read"))]) -> dict[str, Any]:
+async def metrics(
+    request: Request, context: Annotated[RequestContext, Depends(require_scopes("system:read"))]
+) -> dict[str, Any]:
     del context
     return request.app.state.telemetry.snapshot()
+
+
+@router.get("/evaluation/replay", tags=["exercise"], response_model=None)
+async def evaluation_replay(
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    del context
+    return run_replay()
+
+
+@router.put("/pilot/configuration", tags=["pilot"], response_model=None)
+async def configure_pilot(
+    request: Request,
+    configuration: PilotConfigCreate,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+) -> dict[str, Any]:
+    return request.app.state.pilot_store.configure(
+        context, configuration, request.app.state.clock.now()
+    )
+
+
+@router.get("/pilot/status", tags=["pilot"], response_model=None)
+async def pilot_status(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    configuration = request.app.state.pilot_store.get_config(context)
+    events = request.app.state.pilot_store.list_feed_events(context)
+    return {
+        "configuration": configuration,
+        "official_feed_events": len(events),
+        "identity_mode": "development_fixture"
+        if request.app.state.settings.dev_identity_enabled
+        else "external_identity_required",
+        "retention_enforcement": "review_required_no_automatic_deletion",
+    }
+
+
+@router.post("/pilot/official-feeds/events", tags=["pilot"], status_code=201, response_model=None)
+async def ingest_official_feed_event(
+    request: Request,
+    envelope: OfficialFeedEnvelope,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+) -> dict[str, Any]:
+    try:
+        event, replayed = request.app.state.pilot_store.ingest_feed(
+            context, envelope, request.app.state.clock.now()
+        )
+    except PilotConflictError as exc:
+        raise ApiProblem(
+            status=409,
+            code="OFFICIAL_FEED_REJECTED",
+            title="Official feed event rejected",
+            detail=str(exc),
+        ) from None
+    return {"event": event, "replayed": replayed}
+
+
+@router.get("/pilot/retention-preview", tags=["pilot"], response_model=None)
+async def pilot_retention_preview(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+    record_class: str = Query(
+        default="operational", pattern="^(operational|restricted_operational)$"
+    ),
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    configuration = request.app.state.pilot_store.get_config(context)
+    if configuration is None:
+        raise ApiProblem(
+            status=404,
+            code="PILOT_NOT_CONFIGURED",
+            title="Pilot configuration required",
+            detail="Configure the agency and district before evaluating retention.",
+        )
+    return retention_preview(
+        configuration,
+        record_class,  # type: ignore[arg-type]
+        created_at or request.app.state.clock.now(),
+        request.app.state.clock.now(),
+    ).model_dump(mode="json")
+
+
+@router.post("/pilot/exercises/tabletop", tags=["pilot"], response_model=None)
+async def pilot_tabletop_exercise(
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    del context
+    return run_tabletop_exercise()
 
 
 @router.post("/updates", tags=["operations"], status_code=201, response_model=None)
@@ -107,14 +741,103 @@ def _validate_queue_sources(
             incident["id"] for incident in request.app.state.evidence_store.list_incidents(context)
         }
         if item.source_incident_id not in incident_ids:
-            raise ApiProblem(
-                status=404,
-                code="QUEUE_SOURCE_INCIDENT_NOT_FOUND",
-                title="Queue source incident not found",
-                detail=(
-                    "The source incident is not available in the current tenant/workspace scope."
-                ),
-            )
+            try:
+                request.app.state.incident_store.get_incident(context, item.source_incident_id)
+            except CommandIncidentNotFoundError:
+                raise ApiProblem(
+                    status=404,
+                    code="QUEUE_SOURCE_INCIDENT_NOT_FOUND",
+                    title="Queue source incident not found",
+                    detail=(
+                        "The source incident is not available in the current tenant/workspace scope."
+                    ),
+                ) from None
+
+
+@router.post("/missions", tags=["missions"], response_model=None, status_code=201)
+async def create_mission(
+    request: Request,
+    mission: MissionCreate,
+    context: Annotated[
+        RequestContext,
+        Depends(require_scopes("operations:write", "evidence:read", "decision:read")),
+    ],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+) -> dict[str, Any]:
+    try:
+        report = request.app.state.evidence_store.get_report(context, mission.source_report_id)
+        command_incident = request.app.state.incident_store.get_incident(
+            context, mission.source_incident_id
+        )
+    except ReportNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="REPORT_NOT_FOUND",
+            title="Report not found",
+            detail="The source report is outside the current scope.",
+        ) from None
+    except CommandIncidentNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="INCIDENT_NOT_FOUND",
+            title="Incident not found",
+            detail="The command incident is outside the current scope.",
+        ) from None
+    if command_incident["status"] != "active":
+        raise ApiProblem(
+            status=409,
+            code="INCIDENT_NOT_ACTIVE",
+            title="Incident is not active",
+            detail="Missions can only be created for an active command incident.",
+        )
+    if not any(claim["verification_state"] == "corroborated" for claim in report["claims"]):
+        raise ApiProblem(
+            status=409,
+            code="REPORT_NOT_VERIFIED",
+            title="Report is not verified",
+            detail="A commander must corroborate at least one source claim before mission creation.",
+        )
+    queue_item = QueueItemCreate(
+        title=mission.objective,
+        priority=mission.priority,
+        destination=mission.destination,
+        notes="Created from a corroborated report.",
+        queue_type="response",
+        required_capability=mission.required_capability,
+        owner_actor_id=mission.owner_actor_id,
+        source_report_id=mission.source_report_id,
+        source_incident_id=mission.source_incident_id,
+    )
+    try:
+        created = request.app.state.operations_store.create_queue(
+            context, queue_item, request.app.state.clock.now(), idempotency_key
+        )
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different mission.",
+        ) from None
+    return {"mission_id": created["id"], **created}
+
+
+@router.get("/missions", tags=["missions"], response_model=None)
+async def list_missions(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    tasks = {
+        task["queue_item_id"]: task
+        for task in request.app.state.operations_store.list_tasks(context)
+    }
+    return {
+        "items": [
+            {"mission_id": item["id"], **item, "task": tasks.get(item["id"])}
+            for item in request.app.state.operations_store.list_queue(context, "response")
+            if item.get("source_report_id")
+        ]
+    }
 
 
 @router.get("/health/live", tags=["system"])
@@ -282,6 +1005,34 @@ async def link_report_incident(
             code="INCIDENT_NOT_FOUND",
             title="Incident not found",
             detail="The incident is outside the current tenant/workspace scope.",
+        ) from None
+
+
+@router.post("/reports/{report_id}/command-incident-links", tags=["evidence"], response_model=None)
+async def link_report_command_incident(
+    request: Request,
+    report_id: str,
+    link: IncidentLink,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write", "decision:read"))],
+) -> dict[str, Any]:
+    try:
+        request.app.state.incident_store.get_incident(context, link.incident_id)
+        return request.app.state.evidence_store.link_command_incident(
+            context, report_id, link.incident_id, request.app.state.clock.now()
+        )
+    except CommandIncidentNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="INCIDENT_NOT_FOUND",
+            title="Incident not found",
+            detail="The command incident is outside the current scope.",
+        ) from None
+    except ReportNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="REPORT_NOT_FOUND",
+            title="Report not found",
+            detail="The report is outside the current scope.",
         ) from None
 
 
@@ -472,7 +1223,12 @@ async def import_fixture_path(
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
 ) -> dict[str, Any]:
     if request.tenant_id != context.tenant_id or request.workspace_id != context.workspace_id:
-        raise ApiProblem(status=403, code="SCOPE_DENIED", title="Import scope denied", detail="Import scope must match the caller.")
+        raise ApiProblem(
+            status=403,
+            code="SCOPE_DENIED",
+            title="Import scope denied",
+            detail="Import scope must match the caller.",
+        )
     return import_fixture(request).model_dump(mode="json")
 
 
@@ -481,9 +1237,19 @@ async def export_sitrep_path(
     body: dict[str, Any],
     context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
 ) -> dict[str, Any]:
-    if body.get("tenant_id") != context.tenant_id or body.get("workspace_id") != context.workspace_id:
-        raise ApiProblem(status=403, code="SCOPE_DENIED", title="Export scope denied", detail="Export scope must match the caller.")
-    return export_sitrep(body.get("rows", []), datetime.fromisoformat(body["replay_at"].replace("Z", "+00:00")))
+    if (
+        body.get("tenant_id") != context.tenant_id
+        or body.get("workspace_id") != context.workspace_id
+    ):
+        raise ApiProblem(
+            status=403,
+            code="SCOPE_DENIED",
+            title="Export scope denied",
+            detail="Export scope must match the caller.",
+        )
+    return export_sitrep(
+        body.get("rows", []), datetime.fromisoformat(body["replay_at"].replace("Z", "+00:00"))
+    )
 
 
 @router.post("/exports/csv", tags=["evidence"], response_model=None)
@@ -491,9 +1257,22 @@ async def export_csv_path(
     body: dict[str, Any],
     context: Annotated[RequestContext, Depends(require_scopes("evidence:read"))],
 ) -> dict[str, str]:
-    if body.get("tenant_id") != context.tenant_id or body.get("workspace_id") != context.workspace_id:
-        raise ApiProblem(status=403, code="SCOPE_DENIED", title="Export scope denied", detail="Export scope must match the caller.")
-    return {"content_type": "text/csv", "content": export_redacted_csv(body.get("rows", []), context.tenant_id, context.workspace_id)}
+    if (
+        body.get("tenant_id") != context.tenant_id
+        or body.get("workspace_id") != context.workspace_id
+    ):
+        raise ApiProblem(
+            status=403,
+            code="SCOPE_DENIED",
+            title="Export scope denied",
+            detail="Export scope must match the caller.",
+        )
+    return {
+        "content_type": "text/csv",
+        "content": export_redacted_csv(
+            body.get("rows", []), context.tenant_id, context.workspace_id
+        ),
+    }
 
 
 @router.get("/sectors", tags=["geospatial"], response_model=None)
@@ -780,6 +1559,38 @@ async def record_task_outcome(
 ) -> dict[str, Any]:
     try:
         return request.app.state.operations_store.record_task_outcome(
+            context, task_id, outcome, request.app.state.clock.now(), idempotency_key
+        )
+    except TaskNotFoundError:
+        raise ApiProblem(
+            status=404,
+            code="TASK_NOT_FOUND",
+            title="Task not found",
+            detail="The task is outside the current scope.",
+        ) from None
+    except TaskConflictError as exc:
+        raise ApiProblem(
+            status=409, code="TASK_CONFLICT", title="Task outcome conflict", detail=str(exc)
+        ) from None
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different command.",
+        ) from None
+
+
+@router.post("/tasks/{task_id}/structured-outcome", tags=["operations"], response_model=None)
+async def record_structured_task_outcome(
+    request: Request,
+    task_id: str,
+    outcome: StructuredTaskOutcome,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+) -> dict[str, Any]:
+    try:
+        return request.app.state.operations_store.record_structured_outcome(
             context, task_id, outcome, request.app.state.clock.now(), idempotency_key
         )
     except TaskNotFoundError:

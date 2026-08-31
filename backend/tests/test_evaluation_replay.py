@@ -10,7 +10,11 @@ def test_replay_is_deterministic_and_hides_future_records() -> None:
     assert first["result_hash"] == second["result_hash"]
     assert first["record_count"] == 120
     assert first["future_records_excluded"] == 1
-    assert all(datetime.fromisoformat(row["event_time"]) <= REPLAY_AT for row in records() if row["id"] != "future-001")
+    assert all(
+        datetime.fromisoformat(row["event_time"]) <= REPLAY_AT
+        for row in records()
+        if row["id"] != "future-001"
+    )
 
 
 def test_replay_contains_required_signals_and_lifecycle() -> None:

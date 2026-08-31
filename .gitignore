@@ -111,3 +111,13 @@ docs/handoffs/*
 docs/handoffs/phase-1/*
 !docs/handoffs/phase-1/manifest.md
 !docs/handoffs/phase-1/bug-log.md
+# Local recovery material and accidental nested project copies
+HEHEHEHE/
+backend/frontend/
+frontend/frontend/
+tmp_pkg/
+artifacts/recovery/
+artifacts/*.pptx
+agents.md
+project-issue-fix-prompts.md
+how --stat HEAD
