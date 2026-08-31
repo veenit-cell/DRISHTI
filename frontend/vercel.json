@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://drishti-8suvrz5tb-veenitramteke-3246s-projects.vercel.app/api/:path*"
+    }
+  ]
+}
