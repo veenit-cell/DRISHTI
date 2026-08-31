@@ -1,0 +1,43 @@
+name: drishti-real-integration
+
+# Template only. Do not put credentials in this file. Supply the referenced
+# values through the deployment secret manager or an ignored environment file.
+# The backend still fails closed until a real OIDCVerifier and telemetry adapter
+# are injected by the deployment entrypoint.
+services:
+  database:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set a non-production integration database}
+      POSTGRES_USER: ${POSTGRES_USER:?set the integration database user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set through a secret manager}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    environment:
+      EV2_APP_ENVIRONMENT: production
+      EV2_DEV_IDENTITY_ENABLED: "false"
+      EV2_DATABASE_URL: ${EV2_DATABASE_URL:?set through a secret manager}
+      EV2_ALLOWED_ORIGINS: ${EV2_ALLOWED_ORIGINS:?set HTTPS origins as a JSON array}
+      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?configure the deployment identity adapter}
+      TELEMETRY_ADAPTER_URL: ${TELEMETRY_ADAPTER_URL:?configure the deployment telemetry adapter}
+    depends_on:
+      database:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    environment:
+      BACKEND_URL: ${BACKEND_URL:?set the HTTPS backend URL for the Caddy proxy}
+    depends_on:
+      backend:
+        condition: service_started

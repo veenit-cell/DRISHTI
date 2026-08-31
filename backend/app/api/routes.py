@@ -1,12 +1,13 @@
 # ruff: noqa: E501
 
-from datetime import datetime
-from typing import Annotated, Any
+from datetime import UTC, datetime, timedelta
+from typing import Annotated, Any, Callable
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 
 from app.cascade import CascadeRequest, evaluate_cascade
+from app.command_summary import build_command_summary
 from app.core.context import RequestContext, require_scopes
 from app.core.errors import ApiProblem, Problem, problem_response
 from app.coverage import (
@@ -15,7 +16,7 @@ from app.coverage import (
     CoverageNotFoundError,
     CoverageObservationCreate,
 )
-from app.decision_loop import DecisionNotFoundError, DecisionResponse
+from app.decision_loop import DecisionNotFoundError, DecisionResponse, InteractionAuditRequest
 from app.decision_policy import PolicyRequest, evaluate_policy
 from app.decision_snapshot import SnapshotRequest, build_decision_snapshot
 from app.dependencies import (
@@ -33,6 +34,7 @@ from app.evidence import (
     ReportNotFoundError,
 )
 from app.import_export import ImportRequest, export_redacted_csv, export_sitrep, import_fixture
+from app.idempotency import request_hash
 from app.incident_command import (
     CommandRoleAssignment,
     IncidentConflictError,
@@ -52,7 +54,7 @@ from app.mutual_aid import (
     compute_forecast,
     draft_mutual_aid_request,
 )
-from app.offline_sync import SyncBatch
+from app.offline_sync import SyncBatch, SyncResponse
 from app.operations import (
     IdempotencyConflictError,
     MissionCreate,
@@ -68,6 +70,7 @@ from app.operations import (
     TaskOutcome,
     TaskStatusUpdate,
 )
+from app.operational_snapshot import build_operational_snapshot
 from app.persistence import database_ready
 from app.pilot_readiness import (
     OfficialFeedEnvelope,
@@ -84,10 +87,138 @@ from app.shelter_state import (
     ShelterNotFoundError,
     ShelterObservationCreate,
 )
-from app.updates import UpdatePublish
-from app.what_if import WhatIfRequest, evaluate_what_if
+from app.telemetry import build_telemetry_summary
+from app.updates import UpdatePublish, entity_type_for_event, source_class_for
+from app.what_if import WhatIfRequest, WhatIfResult, evaluate_what_if
 
 router = APIRouter()
+
+IdempotencyKey = Annotated[
+    str | None,
+    Header(alias="Idempotency-Key", min_length=3, max_length=128),
+]
+
+
+def _execute_idempotent(
+    request: Request,
+    context: RequestContext,
+    idempotency_key: str | None,
+    payload: Any,
+    action: Callable[[], Any],
+) -> Any:
+    try:
+        effective_key = idempotency_key or f"legacy-{request_hash(payload)}"
+        return request.app.state.idempotency.execute(
+            context,
+            effective_key[:128],
+            payload,
+            action,
+            request.app.state.clock.now(),
+        )
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used with different request data.",
+        ) from None
+
+
+def _safe_read(unavailable: list[str], name: str, reader: Any, default: Any) -> Any:
+    """Return a bounded partial result when a read adapter is temporarily unavailable."""
+    try:
+        return reader()
+    except Exception:
+        unavailable.append(name)
+        return default
+
+
+def _summary_freshness(scenario: dict[str, Any], generated_at: datetime, unavailable: list[str]) -> str:
+    if unavailable:
+        return "degraded"
+    if not scenario:
+        return "unknown"
+    replayed_at = scenario.get("replayed_at")
+    if replayed_at:
+        try:
+            observed = datetime.fromisoformat(str(replayed_at))
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=UTC)
+            comparison_time = generated_at if generated_at.tzinfo else generated_at.replace(tzinfo=UTC)
+            if comparison_time.astimezone(UTC) - observed.astimezone(UTC) > timedelta(hours=6):
+                return "stale"
+        except (TypeError, ValueError):
+            return "unknown"
+    return "fresh"
+
+
+@router.get("/command/summary", tags=["command"], response_model=None)
+async def get_command_summary(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    unavailable: list[str] = []
+    operations = request.app.state.operations_store
+    scenario = _safe_read(unavailable, "decision_store", lambda: request.app.state.decision_store.get_scenario(context), {})
+    generated_at = request.app.state.clock.now()
+    return build_command_summary(
+        resources=_safe_read(unavailable, "operations.resources", lambda: operations.list_resources(context), []),
+        response_queue=_safe_read(unavailable, "operations.response_queue", lambda: operations.list_queue(context, "response"), []),
+        verification_queue=_safe_read(unavailable, "operations.verification_queue", lambda: operations.list_queue(context, "verification"), []),
+        tasks=_safe_read(unavailable, "operations.tasks", lambda: operations.list_tasks(context), []),
+        scenario=scenario,
+        generated_at=generated_at,
+        workspace_mode=request.app.state.workspace_mode,
+        correlation_id=context.correlation_id,
+        freshness_state=_summary_freshness(scenario, generated_at, unavailable),
+        unavailable_stores=unavailable,
+        source="api",
+    )
+
+
+@router.get("/telemetry/summary", tags=["telemetry"], response_model=None)
+async def get_telemetry_summary(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    """Return a bounded, scoped telemetry-health projection without device keys."""
+    adapter = request.app.state.telemetry_adapter
+    return build_telemetry_summary(
+        devices=adapter.list_devices(context),
+        gateways=adapter.list_gateways(context),
+        generated_at=request.app.state.clock.now(),
+        workspace_mode=request.app.state.workspace_mode,
+    )
+
+
+@router.get("/command/operational-snapshot", tags=["command"], response_model=None)
+async def get_operational_snapshot(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    unavailable: list[str] = []
+    generated_at = request.app.state.clock.now()
+    shelters = _safe_read(unavailable, "shelter_state_store.shelters", lambda: request.app.state.shelter_state_store.list_shelters(context), [])
+    current_shelter = min(shelters, key=lambda item: str(item.get("id", "")), default=None)
+    current_shelter_state = (
+        _safe_read(unavailable, "shelter_state_store.state", lambda: request.app.state.shelter_state_store.get_state(context, current_shelter["id"]), None)
+        if current_shelter
+        else None
+    )
+    return build_operational_snapshot(
+        active_incident=_safe_read(unavailable, "incident_store", lambda: request.app.state.incident_store.get_active_incident(context), None),
+        resources=_safe_read(unavailable, "operations.resources", lambda: request.app.state.operations_store.list_resources(context), []),
+        tasks=_safe_read(unavailable, "operations.tasks", lambda: request.app.state.operations_store.list_tasks(context), []),
+        response_queue=_safe_read(unavailable, "operations.response_queue", lambda: request.app.state.operations_store.list_queue(context, "response"), []),
+        verification_queue=_safe_read(unavailable, "operations.verification_queue", lambda: request.app.state.operations_store.list_queue(context, "verification"), []),
+        route_conditions=_safe_read(unavailable, "operations.routes", lambda: request.app.state.operations_store.list_route_observations(context), []),
+        shelter_state=current_shelter_state,
+        pending_recommendations=_safe_read(unavailable, "decision_store.recommendations", lambda: request.app.state.decision_store.list_pending_recommendations(context), []),
+        generated_at=generated_at,
+        mode=request.app.state.workspace_mode,
+        correlation_id=context.correlation_id,
+        unavailable_stores=unavailable,
+    )
 
 
 @router.post("/command/incidents", tags=["command"], status_code=201, response_model=None)
@@ -95,10 +226,17 @@ async def create_command_incident(
     request: Request,
     incident: IncidentCreate,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.incident_store.create_incident(
-            context, incident, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "command_incident.create.v1", "incident": incident.model_dump(mode="json")},
+            lambda: request.app.state.incident_store.create_incident(
+                context, incident, request.app.state.clock.now()
+            ),
         )
     except IncidentConflictError as exc:
         raise ApiProblem(
@@ -126,10 +264,31 @@ async def transition_command_incident(
     incident_id: str,
     update: IncidentTransition,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.incident_store.transition(
-            context, incident_id, update, request.app.state.clock.now()
+        def action() -> dict[str, Any]:
+            result = request.app.state.incident_store.transition(
+                context, incident_id, update, request.app.state.clock.now()
+            )
+            _publish_operational_update(
+                request,
+                context,
+                "incident_phase_changed",
+                incident_id,
+                {"status": update.status, "state": result.get("phase", "unknown")},
+                source="incident_command_api",
+                source_class="operator_report",
+                idempotency_key=idempotency_key,
+            )
+            return result
+
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "command_incident.transition.v1", "incident_id": incident_id, "update": update.model_dump(mode="json")},
+            action,
         )
     except CommandIncidentNotFoundError:
         raise ApiProblem(
@@ -153,10 +312,17 @@ async def assign_command_role(
     incident_id: str,
     assignment: CommandRoleAssignment,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.incident_store.assign_role(
-            context, incident_id, assignment, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "command_incident.role.v1", "incident_id": incident_id, "assignment": assignment.model_dump(mode="json")},
+            lambda: request.app.state.incident_store.assign_role(
+                context, incident_id, assignment, request.app.state.clock.now()
+            ),
         )
     except CommandIncidentNotFoundError:
         raise ApiProblem(
@@ -178,10 +344,17 @@ async def create_incident_sector(
     incident_id: str,
     sector: SectorCreate,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.incident_store.create_sector(
-            context, incident_id, sector, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "command_incident.sector.v1", "incident_id": incident_id, "sector": sector.model_dump(mode="json")},
+            lambda: request.app.state.incident_store.create_sector(
+                context, incident_id, sector, request.app.state.clock.now()
+            ),
         )
     except CommandIncidentNotFoundError:
         raise ApiProblem(
@@ -222,17 +395,27 @@ async def create_resource_forecast(
     request: Request,
     forecast_request: ForecastRequest,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
-    created = request.app.state.mutual_aid_store.create_forecast(
-        context, forecast_request, request.app.state.clock.now()
-    )
-    forecast = compute_forecast(forecast_request)
-    draft = draft_mutual_aid_request(forecast, forecast_request, request.app.state.clock.now())
-    if draft:
-        created["draft_request"] = request.app.state.mutual_aid_store.create_request(
-            context, MutualAidRequestCreate(**draft), request.app.state.clock.now()
+    def action() -> dict[str, Any]:
+        created = request.app.state.mutual_aid_store.create_forecast(
+            context, forecast_request, request.app.state.clock.now()
         )
-    return created
+        forecast = compute_forecast(forecast_request)
+        draft = draft_mutual_aid_request(forecast, forecast_request, request.app.state.clock.now())
+        if draft:
+            created["draft_request"] = request.app.state.mutual_aid_store.create_request(
+                context, MutualAidRequestCreate(**draft), request.app.state.clock.now()
+            )
+        return created
+
+    return _execute_idempotent(
+        request,
+        context,
+        idempotency_key,
+        {"operation": "resource_forecast.create.v1", "forecast": forecast_request.model_dump(mode="json")},
+        action,
+    )
 
 
 @router.get("/resource-forecasts", tags=["mutual-aid"], response_model=None)
@@ -257,10 +440,17 @@ async def approve_resource_request(
     request_id: str,
     approval: MutualAidApproval,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.mutual_aid_store.approve_request(
-            context, request_id, approval, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "resource_request.approve.v1", "request_id": request_id, "approval": approval.model_dump(mode="json")},
+            lambda: request.app.state.mutual_aid_store.approve_request(
+                context, request_id, approval, request.app.state.clock.now()
+            ),
         )
     except MutualAidNotFoundError:
         raise ApiProblem(
@@ -283,8 +473,15 @@ async def create_plan(
     request: Request,
     plan: PlanCreate,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
-    return request.app.state.plan_store.create_plan(context, plan, request.app.state.clock.now())
+    return _execute_idempotent(
+        request,
+        context,
+        idempotency_key,
+        {"operation": "plan.create.v1", "plan": plan.model_dump(mode="json")},
+        lambda: request.app.state.plan_store.create_plan(context, plan, request.app.state.clock.now()),
+    )
 
 
 @router.get("/plans", tags=["plans"], response_model=None)
@@ -318,13 +515,18 @@ async def check_plan_assumptions(
     request: Request,
     plan_id: str,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return {
-            "items": request.app.state.plan_store.check_assumptions(
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "plan.check_assumptions.v1", "plan_id": plan_id},
+            lambda: {"items": request.app.state.plan_store.check_assumptions(
                 context, plan_id, request.app.state.clock.now()
-            )
-        }
+            )},
+        )
     except PlanNotFoundError:
         raise ApiProblem(
             status=404,
@@ -343,10 +545,17 @@ async def invalidate_plan(
         default="manual", pattern=r"^(claim_revision|route_expiry|readiness_expiry|manual)$"
     ),
     trigger_ref: str = Query(..., min_length=1, max_length=160),
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.plan_store.invalidate_plan(
-            context, plan_id, trigger_type, trigger_ref, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "plan.invalidate.v1", "plan_id": plan_id, "trigger_type": trigger_type, "trigger_ref": trigger_ref},
+            lambda: request.app.state.plan_store.invalidate_plan(
+                context, plan_id, trigger_type, trigger_ref, request.app.state.clock.now()
+            ),
         )
     except PlanNotFoundError:
         raise ApiProblem(
@@ -369,10 +578,17 @@ async def create_decision_certificate(
     request: Request,
     certificate: CertificateCreate,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.plan_store.create_certificate(
-            context, certificate, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "decision_certificate.create.v1", "certificate": certificate.model_dump(mode="json")},
+            lambda: request.app.state.plan_store.create_certificate(
+                context, certificate, request.app.state.clock.now()
+            ),
         )
     except PlanNotFoundError:
         raise ApiProblem(
@@ -412,10 +628,17 @@ async def create_infrastructure_node(
     request: Request,
     node: InfraNodeCreate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.dependency_store.create_node(
-            context, node, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "infrastructure.node.create.v1", "node": node.model_dump(mode="json")},
+            lambda: request.app.state.dependency_store.create_node(
+                context, node, request.app.state.clock.now()
+            ),
         )
     except DependencyConflictError:
         raise ApiProblem(
@@ -441,10 +664,17 @@ async def create_infrastructure_dependency(
     request: Request,
     dependency: InfraDependencyCreate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.dependency_store.create_dependency(
-            context, dependency, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "infrastructure.dependency.create.v1", "dependency": dependency.model_dump(mode="json")},
+            lambda: request.app.state.dependency_store.create_dependency(
+                context, dependency, request.app.state.clock.now()
+            ),
         )
     except DependencyConflictError:
         raise ApiProblem(
@@ -479,10 +709,17 @@ async def create_coverage_cell(
     request: Request,
     cell: CoverageCellCreate,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.coverage_store.create_cell(
-            context, cell, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "coverage.cell.create.v1", "cell": cell.model_dump(mode="json")},
+            lambda: request.app.state.coverage_store.create_cell(
+                context, cell, request.app.state.clock.now()
+            ),
         )
     except CoverageConflictError:
         raise ApiProblem(
@@ -533,7 +770,7 @@ async def create_coverage_observation(
     cell_id: str,
     observation: CoverageObservationCreate,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
         return request.app.state.coverage_store.create_observation(
@@ -593,9 +830,16 @@ async def poll_updates(
     limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, Any]:
     try:
-        return request.app.state.update_feed.poll(
+        page = request.app.state.update_feed.poll(
             context.tenant_id, context.workspace_id, cursor, limit
         )
+        generated_at = request.app.state.clock.now().isoformat()
+        return {
+            **page,
+            "correlation_id": context.correlation_id,
+            "generated_at": generated_at,
+            "freshness": {"state": "fresh", "as_of": generated_at},
+        }
     except ValueError:
         raise ApiProblem(
             status=422,
@@ -603,14 +847,45 @@ async def poll_updates(
             title="Invalid update cursor",
             detail="The update cursor is malformed.",
         ) from None
+    except Exception:
+        request.app.state.telemetry.increment("stale_feed_reads")
+        generated_at = request.app.state.clock.now().isoformat()
+        return {
+            "items": [],
+            "next_cursor": cursor or "",
+            "correlation_id": context.correlation_id,
+            "generated_at": generated_at,
+            "freshness": {"state": "degraded", "as_of": generated_at},
+            "availability": {"state": "degraded", "unavailable_stores": ["update_feed"]},
+        }
 
 
 @router.get("/metrics", tags=["system"], response_model=None)
 async def metrics(
     request: Request, context: Annotated[RequestContext, Depends(require_scopes("system:read"))]
 ) -> dict[str, Any]:
-    del context
-    return request.app.state.telemetry.snapshot()
+    unavailable: list[str] = []
+    response_depth = _safe_read(
+        unavailable,
+        "operations.response_queue",
+        lambda: len(request.app.state.operations_store.list_queue(context, "response")),
+        0,
+    )
+    verification_depth = _safe_read(
+        unavailable,
+        "operations.verification_queue",
+        lambda: len(request.app.state.operations_store.list_queue(context, "verification")),
+        0,
+    )
+    snapshot = request.app.state.telemetry.snapshot(
+        queue_depth=response_depth + verification_depth,
+    )
+    return {
+        **snapshot,
+        "generated_at": request.app.state.clock.now().isoformat(),
+        "correlation_id": context.correlation_id,
+        "availability": {"state": "degraded" if unavailable else "available", "unavailable_stores": unavailable},
+    }
 
 
 @router.get("/evaluation/replay", tags=["exercise"], response_model=None)
@@ -626,9 +901,16 @@ async def configure_pilot(
     request: Request,
     configuration: PilotConfigCreate,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
-    return request.app.state.pilot_store.configure(
-        context, configuration, request.app.state.clock.now()
+    return _execute_idempotent(
+        request,
+        context,
+        idempotency_key,
+        {"operation": "pilot.configuration.update.v1", "configuration": configuration.model_dump(mode="json")},
+        lambda: request.app.state.pilot_store.configure(
+            context, configuration, request.app.state.clock.now()
+        ),
     )
 
 
@@ -654,10 +936,21 @@ async def ingest_official_feed_event(
     request: Request,
     envelope: OfficialFeedEnvelope,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        event, replayed = request.app.state.pilot_store.ingest_feed(
-            context, envelope, request.app.state.clock.now()
+        def action() -> dict[str, Any]:
+            event, replayed = request.app.state.pilot_store.ingest_feed(
+                context, envelope, request.app.state.clock.now()
+            )
+            return {"event": event, "replayed": replayed}
+
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "pilot.official_feed_event.create.v1", "envelope": envelope.model_dump(mode="json")},
+            action,
         )
     except PilotConflictError as exc:
         raise ApiProblem(
@@ -666,7 +959,6 @@ async def ingest_official_feed_event(
             title="Official feed event rejected",
             detail=str(exc),
         ) from None
-    return {"event": event, "replayed": replayed}
 
 
 @router.get("/pilot/retention-preview", tags=["pilot"], response_model=None)
@@ -707,19 +999,61 @@ async def publish_update(
     request: Request,
     update: UpdatePublish,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-) -> dict[str, str]:
+    idempotency_key: IdempotencyKey = None,
+) -> dict[str, Any]:
     """Packet-local adapter for committed operational changes in the demo."""
     payload = {"aggregate_id": update.aggregate_id}
     if update.status is not None:
         payload["status"] = update.status
-    cursor = request.app.state.update_feed.publish(
+    try:
+        occurred_at = request.app.state.clock.now().isoformat()
+        cursor = request.app.state.update_feed.publish(
+            context.tenant_id,
+            context.workspace_id,
+            update.event_type,
+            payload,
+            occurred_at,
+            source="operator_api",
+            source_class="operator_report",
+            correlation_id=context.correlation_id,
+            affected_entity_type=entity_type_for_event(update.event_type),
+            affected_entity_id=update.aggregate_id,
+            idempotency_key=idempotency_key,
+        )
+        return {"cursor": cursor, "correlation_id": context.correlation_id, "occurred_at": occurred_at}
+    except ValueError as exc:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail=str(exc),
+        ) from None
+
+
+def _publish_operational_update(
+    request: Request,
+    context: RequestContext,
+    event_type: str,
+    entity_id: str,
+    payload: dict[str, Any] | None = None,
+    source: str = "operational_api",
+    source_class: str | None = None,
+    idempotency_key: str | None = None,
+) -> None:
+    """Publish a bounded envelope after a scoped, committed mutation."""
+    request.app.state.update_feed.publish(
         context.tenant_id,
         context.workspace_id,
-        update.event_type,
-        payload,
+        event_type,
+        {"id": entity_id, **(payload or {})},
         request.app.state.clock.now().isoformat(),
+        source=source,
+        source_class=source_class or source_class_for(source),
+        correlation_id=context.correlation_id,
+        affected_entity_type=entity_type_for_event(event_type),
+        affected_entity_id=entity_id,
+        idempotency_key=idempotency_key,
     )
-    return {"cursor": cursor}
 
 
 def _validate_queue_sources(
@@ -762,7 +1096,7 @@ async def create_mission(
         RequestContext,
         Depends(require_scopes("operations:write", "evidence:read", "decision:read")),
     ],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
         report = request.app.state.evidence_store.get_report(context, mission.source_report_id)
@@ -846,10 +1180,36 @@ async def health_live() -> dict[str, str]:
 
 
 @router.get("/health/ready", tags=["system"], response_model=None)
-async def health_ready(request: Request) -> JSONResponse | dict[str, str]:
+async def health_ready(request: Request) -> JSONResponse | dict[str, Any]:
     settings = request.app.state.settings
-    if database_ready(settings.database_url):
-        return {"status": "ready", "database": "available"}
+    database_status = "available" if database_ready(settings.database_url) else "unavailable"
+    telemetry_adapter = request.app.state.telemetry_adapter
+    adapter_health = getattr(telemetry_adapter, "health_check", None)
+    if callable(adapter_health):
+        try:
+            telemetry_status = str(adapter_health())
+        except Exception:
+            telemetry_status = "unavailable"
+    else:
+        telemetry_status = "unknown"
+    feed_statuses = request.app.state.live_feed_manager.health_status
+    external_status = (
+        "not_checked"
+        if not feed_statuses
+        else "healthy" if all(value == "healthy" for value in feed_statuses.values()) else "degraded"
+    )
+    checks = {
+        "database": database_status,
+        "update_feed": "available" if getattr(request.app.state, "update_feed", None) is not None else "unavailable",
+        "telemetry_adapter": telemetry_status,
+        "external_integrations": external_status,
+    }
+    if database_status == "available":
+        return {
+            "status": "ready",
+            "checks": checks,
+            "correlation_id": request.state.correlation_id,
+        }
     problem = Problem(
         type="https://ev2.local/problems/dependency-unavailable",
         title="Required dependency unavailable",
@@ -892,7 +1252,7 @@ async def create_report(
     request: Request,
     report: ReportCreate,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     """Accept one immutable report; retries reuse the client record identity."""
     if idempotency_key != report.client_record_id:
@@ -967,10 +1327,17 @@ async def review_report(
     report_id: str,
     review: EvidenceReview,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.evidence_store.review_report(
-            context, report_id, review, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "evidence.review.v1", "report_id": report_id, "review": review.model_dump(mode="json")},
+            lambda: request.app.state.evidence_store.review_report(
+                context, report_id, review, request.app.state.clock.now()
+            ),
         )
     except ReportNotFoundError:
         raise ApiProblem(
@@ -987,10 +1354,17 @@ async def link_report_incident(
     report_id: str,
     link: IncidentLink,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.evidence_store.link_incident(
-            context, report_id, link, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "evidence.incident_link.v1", "report_id": report_id, "link": link.model_dump(mode="json")},
+            lambda: request.app.state.evidence_store.link_incident(
+                context, report_id, link, request.app.state.clock.now()
+            ),
         )
     except ReportNotFoundError:
         raise ApiProblem(
@@ -1014,11 +1388,21 @@ async def link_report_command_incident(
     report_id: str,
     link: IncidentLink,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write", "decision:read"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        request.app.state.incident_store.get_incident(context, link.incident_id)
-        return request.app.state.evidence_store.link_command_incident(
-            context, report_id, link.incident_id, request.app.state.clock.now()
+        def action() -> dict[str, Any]:
+            request.app.state.incident_store.get_incident(context, link.incident_id)
+            return request.app.state.evidence_store.link_command_incident(
+                context, report_id, link.incident_id, request.app.state.clock.now()
+            )
+
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "evidence.command_incident_link.v1", "report_id": report_id, "link": link.model_dump(mode="json")},
+            action,
         )
     except CommandIncidentNotFoundError:
         raise ApiProblem(
@@ -1040,9 +1424,15 @@ async def link_report_command_incident(
 async def seed_demo(
     request: Request,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    request_idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
-    created = request.app.state.evidence_store.seed_demo(context, request.app.state.clock.now())
-    return {"synthetic": True, "created": created, "workspace_id": context.workspace_id}
+    return _execute_idempotent(
+        request,
+        context,
+        request_idempotency_key,
+        {"operation": "evidence.demo_seed.v1"},
+        lambda: {"synthetic": True, "created": request.app.state.evidence_store.seed_demo(context, request.app.state.clock.now()), "workspace_id": context.workspace_id},
+    )
 
 
 @router.get("/incidents", tags=["evidence"], response_model=None)
@@ -1058,10 +1448,17 @@ async def create_shelter(
     request: Request,
     shelter: ShelterCreate,
     context: Annotated[RequestContext, Depends(require_scopes("state:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.shelter_state_store.create_shelter(
-            context, shelter, request.app.state.clock.now()
+        return _execute_idempotent(
+            request,
+            context,
+            idempotency_key,
+            {"operation": "shelter.create.v1", "shelter": shelter.model_dump(mode="json")},
+            lambda: request.app.state.shelter_state_store.create_shelter(
+                context, shelter, request.app.state.clock.now()
+            ),
         )
     except ShelterConflictError:
         raise ApiProblem(
@@ -1090,12 +1487,24 @@ async def create_shelter_observation(
     shelter_id: str,
     observation: ShelterObservationCreate,
     context: Annotated[RequestContext, Depends(require_scopes("state:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.shelter_state_store.create_observation(
+        result = request.app.state.shelter_state_store.create_observation(
             context, shelter_id, observation, request.app.state.clock.now(), idempotency_key
         )
+        if not result.get("replayed", False):
+            _publish_operational_update(
+                request,
+                context,
+                "shelter_state_changed",
+                shelter_id,
+                {"freshness_state": observation.freshness_state},
+                source="shelter_state_api",
+                source_class=source_class_for(observation.source),
+                idempotency_key=idempotency_key,
+            )
+        return result
     except ShelterNotFoundError:
         raise ApiProblem(
             status=404,
@@ -1150,9 +1559,17 @@ async def get_shelter_state(
 
 @router.post("/shelter-state/demo/seed", tags=["shelter-state"], response_model=None)
 async def seed_shelter_state_demo(
-    request: Request, context: Annotated[RequestContext, Depends(require_scopes("state:write"))]
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("state:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
-    return request.app.state.shelter_state_store.seed_demo(context, request.app.state.clock.now())
+    return _execute_idempotent(
+        request,
+        context,
+        idempotency_key,
+        {"operation": "shelter.demo_seed.v1"},
+        lambda: request.app.state.shelter_state_store.seed_demo(context, request.app.state.clock.now()),
+    )
 
 
 @router.post("/runway/projections", tags=["shelter-state"], response_model=None)
@@ -1173,7 +1590,7 @@ async def evaluate_cascade_path(
     return evaluate_cascade(request).model_dump(mode="json")
 
 
-@router.post("/what-if/evaluate", tags=["decision-loop"], response_model=None)
+@router.post("/what-if/evaluate", tags=["decision-loop"], response_model=WhatIfResult)
 async def evaluate_what_if_path(
     request: WhatIfRequest,
     context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
@@ -1206,14 +1623,30 @@ async def build_decision_snapshot_path(
     return build_decision_snapshot(request).model_dump(mode="json")
 
 
-@router.post("/offline-sync", tags=["operations"], response_model=None)
+@router.post("/offline-sync", tags=["operations"], response_model=SyncResponse)
 async def reconcile_offline_commands(
     batch: SyncBatch,
     request: Request,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
-    return request.app.state.offline_sync_store.reconcile(
-        batch, context.tenant_id, context.workspace_id, request.app.state.clock.now()
+    def reconcile() -> dict[str, Any]:
+        result = request.app.state.offline_sync_store.reconcile(
+            batch, context.tenant_id, context.workspace_id, request.app.state.clock.now()
+        )
+        reconciliation = result.get("reconciliation", {})
+        if reconciliation.get("rejected", 0) or reconciliation.get("conflicts", 0):
+            request.app.state.telemetry.increment("offline_reconciliation_failures")
+            if reconciliation.get("conflicts", 0):
+                request.app.state.telemetry.increment("sync_conflicts", "conflict")
+        return result
+
+    return _execute_idempotent(
+        request,
+        context,
+        idempotency_key,
+        {"operation": "offline_sync.reconcile.v1", "batch": batch.model_dump(mode="json")},
+        reconcile,
     )
 
 
@@ -1221,6 +1654,7 @@ async def reconcile_offline_commands(
 async def import_fixture_path(
     request: ImportRequest,
     context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     if request.tenant_id != context.tenant_id or request.workspace_id != context.workspace_id:
         raise ApiProblem(
@@ -1229,7 +1663,13 @@ async def import_fixture_path(
             title="Import scope denied",
             detail="Import scope must match the caller.",
         )
-    return import_fixture(request).model_dump(mode="json")
+    return _execute_idempotent(
+        request,
+        context,
+        idempotency_key,
+        {"operation": "fixture.import.v1", "request": request.model_dump(mode="json")},
+        lambda: import_fixture(request).model_dump(mode="json"),
+    )
 
 
 @router.post("/exports/sitrep", tags=["evidence"], response_model=None)
@@ -1325,7 +1765,7 @@ async def map_features(
 async def seed_operations(
     request: Request,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
         return {
@@ -1356,12 +1796,24 @@ async def update_readiness(
     resource_id: str,
     update: ResourceReadinessUpdate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ):
     try:
-        return request.app.state.operations_store.update_readiness(
+        result = request.app.state.operations_store.update_readiness(
             context, resource_id, update, request.app.state.clock.now(), idempotency_key
         )
+        if result:
+            _publish_operational_update(
+                request,
+                context,
+                "resource_readiness_changed",
+                resource_id,
+                {"status": update.readiness},
+                source="resource_readiness_api",
+                source_class="operator_report",
+                idempotency_key=idempotency_key,
+            )
+        return result
     except ResourceNotFoundError:
         raise ApiProblem(
             status=404,
@@ -1376,7 +1828,7 @@ async def create_response_queue(
     request: Request,
     item: QueueItemCreate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     _validate_queue_sources(request, context, item)
     try:
@@ -1404,16 +1856,28 @@ async def create_verification_queue(
     request: Request,
     item: QueueItemCreate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ):
     _validate_queue_sources(request, context, item)
     try:
-        return request.app.state.operations_store.create_queue(
+        result = request.app.state.operations_store.create_queue(
             context,
             item.model_copy(update={"queue_type": "verification"}),
             request.app.state.clock.now(),
             idempotency_key,
         )
+        if result:
+            _publish_operational_update(
+                request,
+                context,
+                "verification_priority_changed",
+                str(result["id"]),
+                {"priority": item.priority},
+                source="verification_queue_api",
+                source_class="operator_report",
+                idempotency_key=idempotency_key,
+            )
+        return result
     except IdempotencyConflictError:
         raise ApiProblem(
             status=409,
@@ -1435,12 +1899,23 @@ async def create_route_observation(
     request: Request,
     observation: RouteObservationCreate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ):
     try:
-        return request.app.state.operations_store.create_route_observation(
+        result = request.app.state.operations_store.create_route_observation(
             context, observation, request.app.state.clock.now(), idempotency_key
         )
+        _publish_operational_update(
+            request,
+            context,
+            "route_condition_changed",
+            observation.destination,
+            {"state": observation.state, "freshness_state": "fresh"},
+            source="route_observation_api",
+            source_class=source_class_for(observation.source),
+            idempotency_key=idempotency_key,
+        )
+        return result
     except IdempotencyConflictError:
         raise ApiProblem(
             status=409,
@@ -1463,12 +1938,24 @@ async def approve_task(
     queue_id: str,
     approval: TaskApproval,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.operations_store.approve_task(
+        result = request.app.state.operations_store.approve_task(
             context, queue_id, approval, request.app.state.clock.now(), idempotency_key
         )
+        if result:
+            _publish_operational_update(
+                request,
+                context,
+                "task_status_changed",
+                str(result["id"]),
+                {"status": result.get("status"), "queue_item_id": queue_id},
+                source="task_assignment_api",
+                source_class="operator_report",
+                idempotency_key=idempotency_key,
+            )
+        return result
     except QueueItemNotFoundError:
         raise ApiProblem(
             status=404,
@@ -1523,12 +2010,24 @@ async def update_task(
     task_id: str,
     update: TaskStatusUpdate,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.operations_store.update_task(
+        result = request.app.state.operations_store.update_task(
             context, task_id, update.status, request.app.state.clock.now(), idempotency_key
         )
+        if result:
+            _publish_operational_update(
+                request,
+                context,
+                "task_status_changed",
+                task_id,
+                {"status": update.status},
+                source="task_status_api",
+                source_class="operator_report",
+                idempotency_key=idempotency_key,
+            )
+        return result
     except TaskNotFoundError:
         raise ApiProblem(
             status=404,
@@ -1555,12 +2054,15 @@ async def record_task_outcome(
     task_id: str,
     outcome: TaskOutcome,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.operations_store.record_task_outcome(
+        result = request.app.state.operations_store.record_task_outcome(
             context, task_id, outcome, request.app.state.clock.now(), idempotency_key
         )
+        if result:
+            _publish_operational_update(request, context, "task_status_changed", task_id, source="task_outcome_api", source_class="operator_report", idempotency_key=idempotency_key)
+        return result
     except TaskNotFoundError:
         raise ApiProblem(
             status=404,
@@ -1587,12 +2089,15 @@ async def record_structured_task_outcome(
     task_id: str,
     outcome: StructuredTaskOutcome,
     context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.operations_store.record_structured_outcome(
+        result = request.app.state.operations_store.record_structured_outcome(
             context, task_id, outcome, request.app.state.clock.now(), idempotency_key
         )
+        if result:
+            _publish_operational_update(request, context, "task_status_changed", task_id, source="task_outcome_api", source_class="operator_report", idempotency_key=idempotency_key)
+        return result
     except TaskNotFoundError:
         raise ApiProblem(
             status=404,
@@ -1617,7 +2122,7 @@ async def record_structured_task_outcome(
 async def replay_decision_demo(
     request: Request,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
         return request.app.state.decision_store.replay(
@@ -1643,12 +2148,23 @@ async def get_decision_scenario(
 async def create_recommendation(
     request: Request,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.decision_store.recommend(
+        result = request.app.state.decision_store.recommend(
             context, request.app.state.clock.now(), idempotency_key
         )
+        if result:
+            _publish_operational_update(
+                request,
+                context,
+                "recommendation_changed",
+                str(result["id"]),
+                {"status": result.get("status")},
+                source="decision_loop_api",
+                idempotency_key=idempotency_key,
+            )
+        return result
     except IdempotencyConflictError:
         raise ApiProblem(
             status=409,
@@ -1656,6 +2172,18 @@ async def create_recommendation(
             title="Idempotency conflict",
             detail="This key was already used for a different command.",
         ) from None
+
+
+@router.get("/decision-loop/recommendations/current", tags=["decision-loop"], response_model=None)
+async def get_current_recommendation(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+) -> dict[str, Any]:
+    return {
+        "recommendation": request.app.state.decision_store.get_current_recommendation(context),
+        "correlation_id": context.correlation_id,
+        "generated_at": request.app.state.clock.now().isoformat(),
+    }
 
 
 @router.post(
@@ -1668,12 +2196,23 @@ async def decide_recommendation(
     recommendation_id: str,
     response: DecisionResponse,
     context: Annotated[RequestContext, Depends(require_scopes("decision:write"))],
-    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=3, max_length=128)],
+    idempotency_key: IdempotencyKey = None,
 ) -> dict[str, Any]:
     try:
-        return request.app.state.decision_store.decide(
+        result = request.app.state.decision_store.decide(
             context, recommendation_id, response, request.app.state.clock.now(), idempotency_key
         )
+        if result:
+            _publish_operational_update(
+                request,
+                context,
+                "recommendation_changed",
+                recommendation_id,
+                {"status": result.get("status")},
+                source="decision_loop_api",
+                idempotency_key=idempotency_key,
+            )
+        return result
     except DecisionNotFoundError:
         raise ApiProblem(
             status=404,
@@ -1690,14 +2229,147 @@ async def decide_recommendation(
         ) from None
 
 
+@router.post("/decision-loop/audit/interactions", tags=["decision-loop"], response_model=None)
+async def record_decision_interaction(
+    request: Request,
+    interaction: InteractionAuditRequest,
+    context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
+    idempotency_key: IdempotencyKey = None,
+) -> dict[str, Any]:
+    expected_type = {
+        "recommendation_viewed": "recommendation",
+        "evidence_opened": "evidence",
+        "scenario_evaluated": "scenario",
+    }[interaction.event]
+    if interaction.subject_type != expected_type:
+        raise ApiProblem(
+            status=422,
+            code="INVALID_AUDIT_SUBJECT",
+            title="Invalid audit subject",
+            detail="The interaction event and subject type must refer to the same scoped entity.",
+        )
+    if interaction.event == "evidence_opened" and "evidence:read" not in context.scopes:
+        raise ApiProblem(
+            status=403,
+            code="SCOPE_DENIED",
+            title="Required scope denied",
+            detail="Evidence interactions require evidence read scope.",
+        )
+    try:
+        result = request.app.state.decision_store.record_interaction(
+            context, interaction, request.app.state.clock.now(), idempotency_key
+        )
+        return {**result, "correlation_id": context.correlation_id}
+    except IdempotencyConflictError:
+        raise ApiProblem(
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+            title="Idempotency conflict",
+            detail="This key was already used for a different audit interaction.",
+        ) from None
+
+
 @router.get("/decision-loop/audit", tags=["decision-loop"], response_model=None)
 async def decision_audit(
     request: Request,
     context: Annotated[RequestContext, Depends(require_scopes("decision:read"))],
     after: str | None = Query(default=None, max_length=64),
+    limit: int = Query(default=50, ge=1, le=100),
 ) -> dict[str, Any]:
-    items = request.app.state.decision_store.audit(context)
+    items = request.app.state.decision_store.audit(context, after, limit)
     return {
-        "items": [item for item in items if not after or item.get("at", "") > after],
+        "items": items,
         "next_after": items[-1].get("at") if items else after,
+        "correlation_id": context.correlation_id,
+        "generated_at": request.app.state.clock.now().isoformat(),
     }
+@router.post("/feeds/sync", tags=["feeds"], response_model=None)
+async def sync_live_feeds(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("evidence:write"))],
+    idempotency_key: IdempotencyKey = None,
+) -> dict[str, Any]:
+    manager = request.app.state.live_feed_manager
+
+    async def action() -> dict[str, Any]:
+        reports = await manager.sync_all()
+        if any(status != "healthy" for status in manager.health_status.values()):
+            request.app.state.telemetry.increment("external_integration_failures")
+        created_reports = []
+        for rpt in reports:
+            try:
+                record, exists = request.app.state.evidence_store.create_report(
+                    context, rpt, request.app.state.clock.now()
+                )
+                if not exists:
+                    created_reports.append(record)
+            except Exception:
+                continue
+        return {
+            "synced_count": len(reports),
+            "created_count": len(created_reports),
+            "health_status": manager.health_status,
+            "last_sync_time": manager.last_sync_time.isoformat() if manager.last_sync_time else None,
+        }
+
+    return await request.app.state.idempotency.execute_async(
+        context,
+        idempotency_key or f"legacy-feed-sync-{request.app.state.clock.now().strftime('%Y%m%d%H')}",
+        {"operation": "feeds.sync.v1"},
+        action,
+        request.app.state.clock.now(),
+    )
+
+@router.get("/workspace/mode", tags=["workspace"], response_model=None)
+async def get_workspace_mode(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:read"))],
+) -> dict[str, Any]:
+    manager = request.app.state.live_feed_manager
+    return {
+        "mode": request.app.state.workspace_mode,
+        "health_status": manager.health_status,
+        "last_sync_time": manager.last_sync_time.isoformat() if manager.last_sync_time else None,
+    }
+
+@router.post("/workspace/mode", tags=["workspace"], response_model=None)
+async def set_workspace_mode(
+    request: Request,
+    context: Annotated[RequestContext, Depends(require_scopes("operations:write"))],
+    mode: str = Query(..., pattern="^(live|synthetic|mixed)$"),
+    idempotency_key: IdempotencyKey = None,
+) -> dict[str, Any]:
+    return _execute_idempotent(
+        request,
+        context,
+        idempotency_key,
+        {"operation": "workspace.mode.update.v1", "mode": mode},
+        lambda: _set_workspace_mode(request, mode),
+    )
+
+
+def _set_workspace_mode(request: Request, mode: str) -> dict[str, Any]:
+    request.app.state.workspace_mode = mode
+    return {"mode": mode}
+
+@router.post("/lorawan/webhook", tags=["lorawan"], response_model=None)
+async def lorawan_webhook(
+    request: Request,
+    body: dict[str, Any],
+    event: str = Query(..., description="ChirpStack event type (up, status, join, etc.)"),
+) -> dict:
+    """Receive ChirpStack HTTP integration webhooks."""
+    settings = request.app.state.settings
+    
+    # Very basic validation: in production use proper signature verification
+    token = request.headers.get("X-Chirpstack-Token", "")
+    expected_token = getattr(settings, "lorawan_webhook_secret", "")
+    
+    if expected_token and token != expected_token:
+        raise HTTPException(status_code=401, detail="Invalid webhook token")
+
+    adapter = getattr(request.app.state, "telemetry_adapter", None)
+    if hasattr(adapter, "ingest_event"):
+        adapter.ingest_event(event, body)
+        
+    return {"accepted": True}

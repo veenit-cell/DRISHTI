@@ -1,0 +1,9 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+COPY backend/pyproject.toml ./
+COPY backend/app ./app
+COPY backend/migrations ./migrations
+COPY backend/tests ./tests
+RUN python -m pip install --no-cache-dir ".[dev]"
+CMD ["sh", "-c", "python -m app.persistence && pytest -p no:cacheprovider"]

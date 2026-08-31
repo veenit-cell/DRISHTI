@@ -1,0 +1,29 @@
+name: drishti-integration
+
+services:
+  database:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_DB: ev2_test
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ev2_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  backend-tests:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile.test
+    environment:
+      EV2_APP_ENVIRONMENT: test
+      EV2_DATABASE_URL: postgresql://postgres@database:5432/ev2_test
+      EV2_DEV_IDENTITY_ENABLED: "true"
+    depends_on:
+      database:
+        condition: service_healthy
+    command: ["sh", "-c", "python -m app.persistence && pytest -p no:cacheprovider"]

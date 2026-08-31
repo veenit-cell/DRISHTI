@@ -40,6 +40,7 @@ class QueueItemCreate(BaseModel):
     due_at: datetime | None = None
     source_report_id: str | None = Field(default=None, max_length=128)
     source_incident_id: str | None = Field(default=None, max_length=128)
+    source_recommendation_id: str | None = Field(default=None, max_length=128)
 
 
 class MissionCreate(BaseModel):
@@ -62,7 +63,7 @@ class ResourceReadinessUpdate(BaseModel):
 
 class RouteObservationCreate(BaseModel):
     destination: str = Field(min_length=1, max_length=120)
-    state: str = Field(pattern="^(passable|blocked|unknown|stale)$")
+    state: str = Field(pattern="^(passable|open|blocked|degraded|unknown|stale|high_risk)$")
     observed_at: datetime
     expires_at: datetime | None = None
     source: str | None = Field(default=None, max_length=80)
@@ -246,14 +247,18 @@ class InMemoryOperationsStore:
         existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
         if existing:
             return self._replay_or_record(context, idempotency_key, payload, {})
-        if any(r["workspace_id"] == context.workspace_id for r in self.resources.values()):
+        if any(r.get("tenant_id") == context.tenant_id and r["workspace_id"] == context.workspace_id for r in self.resources.values()):
             return self._replay_or_record(
                 context, idempotency_key, payload, {"resources": 0, "queue_items": 0}
             )
-        for name, typ, readiness, location in [
-            ("Synthetic Water Team Alpha", "water_team", "ready", "North Sector"),
-            ("Synthetic Generator Unit", "power_unit", "ready", "Central Shelter"),
-            ("Synthetic Medical Van", "medical_transport", "not_ready", "East Depot"),
+        for name, typ, readiness, location, feasibility, caps in [
+            ("Synthetic Water Team Alpha", "water_team", "ready", "North Sector", "feasible", ["water_delivery"]),
+            ("Synthetic Rescue Boat 1", "boat", "ready", "North Riverbank", "feasible", ["boat_rescue", "flood_evacuation"]),
+            ("Synthetic Medical Team Beta", "medical_team", "ready", "East Clinic", "constrained", ["triage", "first_aid"]),
+            ("Synthetic Heavy Excavator Unit", "excavator", "not_ready", "Central Yard", "infeasible", ["debris_clearance"]),
+            ("Synthetic SAR Team Charlie", "sar_team", "ready", "West Outpost", "feasible", ["search_and_rescue"]),
+            ("Synthetic Generator Unit", "power_unit", "ready", "Central Shelter", "feasible", ["generator"]),
+            ("Synthetic Medical Van", "medical_transport", "not_ready", "East Depot", "infeasible", ["medical_transport"]),
         ]:
             resource_id = _opaque_id("res")
             self.resources[resource_id] = {
@@ -261,26 +266,34 @@ class InMemoryOperationsStore:
                 "name": name,
                 "resource_type": typ,
                 "readiness": readiness,
+                "feasibility": feasibility,
                 "location": location,
                 "workspace_id": context.workspace_id,
+                "tenant_id": context.tenant_id,
                 "created_at": now.isoformat(),
-                "capabilities": (
-                    ["water_delivery"]
-                    if typ == "water_team"
-                    else ["generator"]
-                    if typ == "power_unit"
-                    else ["medical_transport"]
-                ),
+                "capabilities": caps,
                 "readiness_observed_at": now.isoformat(),
                 "readiness_expires_at": (now + timedelta(hours=4)).isoformat(),
             }
         return self._replay_or_record(
-            context, idempotency_key, payload, {"resources": 3, "queue_items": 0}
+            context,
+            idempotency_key,
+            payload,
+            {
+                "resources": sum(
+                    1
+                    for resource in self.resources.values()
+                    if resource.get("tenant_id", context.tenant_id) == context.tenant_id
+                    and resource["workspace_id"] == context.workspace_id
+                ),
+                "queue_items": 0,
+            },
         )
 
     def list_resources(self, context: RequestContext) -> list[dict[str, Any]]:
         return [
-            dict(r) for r in self.resources.values() if r["workspace_id"] == context.workspace_id
+            dict(r) for r in self.resources.values()
+            if r.get("tenant_id", context.tenant_id) == context.tenant_id and r["workspace_id"] == context.workspace_id
         ]
 
     def update_readiness(self, context, resource_id, update, now, idempotency_key):
@@ -293,7 +306,7 @@ class InMemoryOperationsStore:
         if existing:
             return self._replay_or_record(context, idempotency_key, payload, {})
         resource = self.resources.get(resource_id)
-        if resource is None or resource["workspace_id"] != context.workspace_id:
+        if resource is None or resource.get("tenant_id", context.tenant_id) != context.tenant_id or resource["workspace_id"] != context.workspace_id:
             raise ResourceNotFoundError
         readiness_changed = resource["readiness"] != update.readiness or resource.get(
             "readiness_expires_at"
@@ -322,6 +335,7 @@ class InMemoryOperationsStore:
             **item.model_dump(),
             "status": "queued",
             "workspace_id": context.workspace_id,
+            "tenant_id": context.tenant_id,
             "created_at": now.isoformat(),
         }
         self.queue[item_id] = record
@@ -333,7 +347,8 @@ class InMemoryOperationsStore:
         return [
             dict(item)
             for item in self.queue.values()
-            if item["workspace_id"] == context.workspace_id
+            if item.get("tenant_id", context.tenant_id) == context.tenant_id
+            and item["workspace_id"] == context.workspace_id
             and item.get("queue_type", "response") == queue_type
         ]
 
@@ -349,6 +364,7 @@ class InMemoryOperationsStore:
             "id": _opaque_id("route"),
             **observation.model_dump(mode="json"),
             "workspace_id": context.workspace_id,
+            "tenant_id": context.tenant_id,
             "created_at": now.isoformat(),
         }
         self.queue.setdefault("__routes__", {}) if False else None
@@ -366,7 +382,8 @@ class InMemoryOperationsStore:
         return [
             dict(v)
             for v in getattr(self, "routes", {}).values()
-            if v["workspace_id"] == context.workspace_id
+            if v.get("tenant_id", context.tenant_id) == context.tenant_id
+            and v["workspace_id"] == context.workspace_id
         ]
 
     def approve_task(
@@ -387,9 +404,9 @@ class InMemoryOperationsStore:
             return self._replay_or_record(context, idempotency_key, payload, {})
         item = self.queue.get(queue_id)
         resource = self.resources.get(approval.resource_id)
-        if item is None or item["workspace_id"] != context.workspace_id:
+        if item is None or item.get("tenant_id", context.tenant_id) != context.tenant_id or item["workspace_id"] != context.workspace_id:
             raise QueueItemNotFoundError
-        if resource is None or resource["workspace_id"] != context.workspace_id:
+        if resource is None or resource.get("tenant_id", context.tenant_id) != context.tenant_id or resource["workspace_id"] != context.workspace_id:
             raise ResourceNotFoundError
         if not approval.approved:
             item["status"] = "rejected"
@@ -412,7 +429,8 @@ class InMemoryOperationsStore:
             observations = [
                 r
                 for r in self.routes.values()
-                if r["workspace_id"] == context.workspace_id
+                if r.get("tenant_id", context.tenant_id) == context.tenant_id
+                and r["workspace_id"] == context.workspace_id
                 and r["destination"] == item["destination"]
             ]
             latest = max(observations, key=lambda r: r["observed_at"], default=None)
@@ -424,7 +442,10 @@ class InMemoryOperationsStore:
             ):
                 raise TaskConflictError("route is not confirmed passable")
         if any(
-            task["resource_id"] == resource["id"] and task["status"] != "completed"
+            task.get("tenant_id", context.tenant_id) == context.tenant_id
+            and task["workspace_id"] == context.workspace_id
+            and task["resource_id"] == resource["id"]
+            and task["status"] != "completed"
             for task in self.tasks.values()
         ):
             raise TaskConflictError("resource already has an active task")
@@ -437,6 +458,7 @@ class InMemoryOperationsStore:
             "approved": True,
             "approved_by": context.actor_id,
             "approved_at": now.isoformat(),
+            "tenant_id": context.tenant_id,
             "workspace_id": context.workspace_id,
         }
         self.tasks[task_id] = task
@@ -456,7 +478,7 @@ class InMemoryOperationsStore:
         if existing:
             return self._replay_or_record(context, idempotency_key, payload, {})
         task = self.tasks.get(task_id)
-        if task is None or task["workspace_id"] != context.workspace_id:
+        if task is None or task.get("tenant_id", context.tenant_id) != context.tenant_id or task["workspace_id"] != context.workspace_id:
             raise TaskNotFoundError
         transitions = {
             "assigned": "acknowledged",
@@ -478,7 +500,8 @@ class InMemoryOperationsStore:
         return [
             dict(task)
             for task in self.tasks.values()
-            if task["workspace_id"] == context.workspace_id
+            if task.get("tenant_id", context.tenant_id) == context.tenant_id
+            and task["workspace_id"] == context.workspace_id
         ]
 
     def record_task_outcome(self, context, task_id, outcome, now, idempotency_key):
@@ -491,7 +514,7 @@ class InMemoryOperationsStore:
         if existing:
             return self._replay_or_record(context, idempotency_key, payload, {})
         task = self.tasks.get(task_id)
-        if task is None or task["workspace_id"] != context.workspace_id:
+        if task is None or task.get("tenant_id", context.tenant_id) != context.tenant_id or task["workspace_id"] != context.workspace_id:
             raise TaskNotFoundError
         if task["status"] != "completed":
             raise TaskConflictError("task outcome requires completion")
@@ -509,7 +532,7 @@ class InMemoryOperationsStore:
         if existing:
             return self._replay_or_record(context, idempotency_key, payload, {})
         task = self.tasks.get(task_id)
-        if task is None or task["workspace_id"] != context.workspace_id:
+        if task is None or task.get("tenant_id", context.tenant_id) != context.tenant_id or task["workspace_id"] != context.workspace_id:
             raise TaskNotFoundError
         if task["status"] != "completed":
             raise TaskConflictError("structured outcome requires completion")
@@ -544,17 +567,20 @@ class InMemoryOperationsStore:
         self.resources = {
             key: value
             for key, value in self.resources.items()
-            if value["workspace_id"] != context.workspace_id
+            if value.get("tenant_id", context.tenant_id) != context.tenant_id
+            or value["workspace_id"] != context.workspace_id
         }
         self.queue = {
             key: value
             for key, value in self.queue.items()
-            if value["workspace_id"] != context.workspace_id
+            if value.get("tenant_id", context.tenant_id) != context.tenant_id
+            or value["workspace_id"] != context.workspace_id
         }
         self.tasks = {
             key: value
             for key, value in self.tasks.items()
-            if value["workspace_id"] != context.workspace_id
+            if value.get("tenant_id", context.tenant_id) != context.tenant_id
+            or value["workspace_id"] != context.workspace_id
         }
         self._idempotent = {
             key: value for key, value in self._idempotent.items() if key[1] != context.workspace_id
@@ -826,7 +852,7 @@ class PostgreSQLOperationsStore:
             if existing is not None:
                 return existing
             cursor.execute(
-                "INSERT INTO response_queue_items (organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s) RETURNING id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, status, created_at",
+                "INSERT INTO response_queue_items (organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, source_recommendation_id, status, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued', %s) RETURNING id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, source_recommendation_id, status, created_at",
                 (
                     context.tenant_id,
                     context.workspace_id,
@@ -840,6 +866,7 @@ class PostgreSQLOperationsStore:
                     item.due_at,
                     item.source_report_id,
                     item.source_incident_id,
+                    item.source_recommendation_id,
                     now,
                 ),
             )
@@ -856,8 +883,9 @@ class PostgreSQLOperationsStore:
                 "due_at": _iso(row[8]),
                 "source_report_id": row[9],
                 "source_incident_id": row[10],
-                "status": row[11],
-                "created_at": _iso(row[12]),
+                "source_recommendation_id": row[11],
+                "status": row[12],
+                "created_at": _iso(row[13]),
             }
             self._audit(
                 cursor,
@@ -876,7 +904,7 @@ class PostgreSQLOperationsStore:
     ) -> list[dict[str, Any]]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, status, created_at FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s AND queue_type = %s ORDER BY created_at, id",
+                "SELECT id, title, priority, destination, notes, queue_type, required_capability, owner_actor_id, due_at, source_report_id, source_incident_id, source_recommendation_id, status, created_at FROM response_queue_items WHERE organization_id = %s AND workspace_id = %s AND queue_type = %s ORDER BY created_at, id",
                 (context.tenant_id, context.workspace_id, queue_type),
             )
             return [
@@ -892,8 +920,9 @@ class PostgreSQLOperationsStore:
                     "due_at": _iso(row[8]),
                     "source_report_id": row[9],
                     "source_incident_id": row[10],
-                    "status": row[11],
-                    "created_at": _iso(row[12]),
+                    "source_recommendation_id": row[11],
+                    "status": row[12],
+                    "created_at": _iso(row[13]),
                 }
                 for row in cursor.fetchall()
             ]

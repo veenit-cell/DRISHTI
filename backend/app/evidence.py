@@ -41,6 +41,10 @@ class LocationInput(BaseModel):
     geometry: dict[str, Any]
     uncertainty_m: int | None = Field(default=None, ge=0)
     place_text: str | None = Field(default=None, max_length=256)
+    state_code: str | None = Field(default=None, max_length=16)
+    district_id: str | None = Field(default=None, max_length=64)
+    block_id: str | None = Field(default=None, max_length=64)
+    village_id: str | None = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def validate_point(self) -> LocationInput:

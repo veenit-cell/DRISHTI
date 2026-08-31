@@ -33,10 +33,18 @@ from app.plans import PlanActionCreate, PlanAssumptionCreate, PlanCreate, PlanSt
 class DecisionResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    decision: str = Field(pattern="^(approve|reject)$")
+    decision: str = Field(pattern="^(approve|reject|modify)$")
     note: str | None = Field(default=None, max_length=500)
     resource_id: str | None = None
     selected_action: str | None = Field(default=None, max_length=160)
+
+
+class InteractionAuditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event: str = Field(pattern="^(recommendation_viewed|evidence_opened|scenario_evaluated)$")
+    subject_type: str = Field(pattern="^(recommendation|evidence|scenario)$")
+    subject_id: str = Field(min_length=1, max_length=128)
 
 
 class DecisionNotFoundError(Exception):
@@ -112,7 +120,7 @@ class InMemoryDecisionStore:
         self.operations_store = operations_store
         self.dependency_store = dependency_store
         self.plan_store = plan_store
-        self.scenarios: dict[str, dict[str, Any]] = {}
+        self.scenarios: dict[tuple[str, str], dict[str, Any]] = {}
         self.recommendations: dict[str, dict[str, Any]] = {}
         self.audit_events: list[dict[str, Any]] = []
         self._idempotent: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
@@ -150,19 +158,26 @@ class InMemoryDecisionStore:
             },
             "replayed_at": now.isoformat(),
         }
-        self.scenarios[context.workspace_id] = scenario
+        self.scenarios[(context.tenant_id, context.workspace_id)] = scenario
         self.recommendations = {
             key: value
             for key, value in self.recommendations.items()
-            if value["workspace_id"] != context.workspace_id
+            if value["tenant_id"] != context.tenant_id or value["workspace_id"] != context.workspace_id
         }
         self.audit_events.append(
-            {"event": "scenario_replayed", "actor_id": context.actor_id, "at": now.isoformat()}
+            {
+                "event": "scenario_replayed",
+                "actor_id": context.actor_id,
+                "at": now.isoformat(),
+                "tenant_id": context.tenant_id,
+                "workspace_id": context.workspace_id,
+                "correlation_id": context.correlation_id,
+            }
         )
         return self._replay_or_record(context, idempotency_key, payload, scenario)
 
     def get_scenario(self, context: RequestContext) -> dict[str, Any]:
-        return dict(self.scenarios.get(context.workspace_id) or {})
+        return dict(self.scenarios.get((context.tenant_id, context.workspace_id)) or {})
 
     def recommend(
         self, context: RequestContext, now: datetime, idempotency_key: str
@@ -171,7 +186,7 @@ class InMemoryDecisionStore:
         existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
         if existing:
             return self._replay_or_record(context, idempotency_key, payload, {})
-        scenario = self.scenarios.get(context.workspace_id)
+        scenario = self.scenarios.get((context.tenant_id, context.workspace_id))
         if scenario is None:
             scenario = self.replay(context, now, f"implicit-replay-{_opaque_id('key')}")
         signals = scenario["signals"]
@@ -215,7 +230,11 @@ class InMemoryDecisionStore:
             "expected_effect": "protect potable-water continuity before the 3.5 hour runway threshold",
             "expires_at": (now + timedelta(hours=4)).isoformat(),
             "auto_dispatched": False,
+            "queue_item_id": None,
+            "selected_action": None,
+            "selected_resource_id": None,
             "created_at": now.isoformat(),
+            "tenant_id": context.tenant_id,
             "workspace_id": context.workspace_id,
         }
         policy = evaluate_policy(
@@ -258,6 +277,30 @@ class InMemoryDecisionStore:
         recommendation["plan_ids"] = _persist_alternative_plans(
             self.plan_store, context, recommendation, now
         )
+        for cand in recommendation.get("candidates", []):
+            action_name = cand.get("action", "").lower()
+            if "water" in action_name:
+                cand["priority_reason"] = "Potable water runway in North Sector is 3.5h, below emergency 6.0h threshold with incoming population influx."
+                cand["evidence_available"] = "Corroborated sensor telemetry + drone reconnaissance (rpt_demo_01, rpt_demo_02)."
+                cand["important_unknowns"] = "INFORMATION GAP: Dharapur Village silent (0 reports, pop: 4,200); West corridor bridge unassessed."
+                cand["resource_availability"] = "FEASIBLE: Synthetic Water Team Alpha & Rescue Boat 1 ready on scene."
+                cand["route_accessibility"] = "NH-27 Highway Open; West Bank River Corridor Degraded / Blocked."
+                cand["decision_model"] = {"need": "Critical", "confidence": "Medium", "feasibility": "Feasible"}
+            elif "power" in action_name:
+                cand["priority_reason"] = "Protects cold chain and water purification pumps from cascading outage."
+                cand["evidence_available"] = "Central Shelter load reports and infrastructure dependency model."
+                cand["important_unknowns"] = "Fuel reserve delivery status unknown for East corridor."
+                cand["resource_availability"] = "FEASIBLE: Generator Unit ready at Central Shelter."
+                cand["route_accessibility"] = "Central road network Open."
+                cand["decision_model"] = {"need": "High", "confidence": "High", "feasibility": "Feasible"}
+            else:
+                cand["priority_reason"] = "Restores mission capability and access for downstream critical sectors."
+                cand["evidence_available"] = "Infrastructure node dependency telemetry."
+                cand["important_unknowns"] = "Structural damage extent pending ground reconnaissance."
+                cand["resource_availability"] = "CONSTRAINED: Heavy excavator awaiting transport."
+                cand["route_accessibility"] = "Route degraded by mud and debris."
+                cand["decision_model"] = {"need": "Medium", "confidence": "Medium", "feasibility": "Constrained"}
+
         self.recommendations[recommendation["id"]] = recommendation
         self.audit_events.append(
             {
@@ -265,6 +308,9 @@ class InMemoryDecisionStore:
                 "recommendation_id": recommendation["id"],
                 "actor_id": context.actor_id,
                 "at": now.isoformat(),
+                "tenant_id": context.tenant_id,
+                "workspace_id": context.workspace_id,
+                "correlation_id": context.correlation_id,
             }
         )
         return self._replay_or_record(context, idempotency_key, payload, recommendation)
@@ -286,7 +332,7 @@ class InMemoryDecisionStore:
         if existing:
             return self._replay_or_record(context, idempotency_key, payload, {})
         recommendation = self.recommendations.get(recommendation_id)
-        if recommendation is None or recommendation["workspace_id"] != context.workspace_id:
+        if recommendation is None or recommendation["tenant_id"] != context.tenant_id or recommendation["workspace_id"] != context.workspace_id:
             raise DecisionNotFoundError
         if recommendation["status"] != "pending_approval":
             raise DecisionNotFoundError
@@ -294,30 +340,16 @@ class InMemoryDecisionStore:
             recommendation["expires_at"]
         ) <= now.astimezone(UTC):
             raise DecisionNotFoundError
-        recommendation["status"] = "approved" if response.decision == "approve" else "rejected"
-        recommendation["decided_by"] = context.actor_id
-        recommendation["decided_at"] = now.isoformat()
-        recommendation["decision_note"] = response.note
-        recommendation["auto_dispatched"] = False
-        if response.decision == "approve":
+        if response.decision in ("approve", "modify"):
             selected_action = response.selected_action or recommendation["candidates"][0]["action"]
             selected = next((item for item in recommendation["candidates"] if item["action"] == selected_action), None)
             if selected is None:
                 raise DecisionNotFoundError
-            recommendation["selected_action"] = selected_action
+            chosen = None
             if selected_action.startswith("restore_"):
-                queue = self.operations_store.create_queue(
-                    context,
-                    QueueItemCreate(
-                        title=selected_action,
-                        priority="high",
-                        destination=recommendation["sector"],
-                        required_capability="infrastructure_restoration",
-                    ),
-                    now,
-                    f"recommendation-queue-{recommendation_id}",
-                )
-                recommendation["queue_item_id"] = queue["id"]
+                required_capability = "infrastructure_restoration"
+                queue_priority = "high"
+                queue_title = selected_action
             else:
                 chosen = response.resource_id or (
                     recommendation["compatible_resources"][0]["id"]
@@ -328,33 +360,113 @@ class InMemoryDecisionStore:
                     r["id"] for r in recommendation["compatible_resources"]
                 }:
                     raise DecisionNotFoundError
-                queue = self.operations_store.create_queue(
-                    context,
-                    QueueItemCreate(
-                        title=recommendation["action"],
-                        priority="critical",
-                        destination=recommendation["sector"],
-                        required_capability="water_delivery",
-                    ),
-                    now,
-                    f"recommendation-queue-{recommendation_id}",
-                )
-                recommendation["queue_item_id"] = queue["id"]
-        self.audit_events.append(
-            {
-                "event": f"recommendation_{recommendation['status']}",
-                "recommendation_id": recommendation_id,
-                "actor_id": context.actor_id,
-                "at": now.isoformat(),
-                "auto_dispatched": False,
-            }
-        )
+                required_capability = "water_delivery"
+                queue_priority = "critical"
+                queue_title = selected_action
+            recommendation["selected_action"] = selected_action
+            recommendation["selected_resource_id"] = chosen
+            queue = self.operations_store.create_queue(
+                context,
+                QueueItemCreate(
+                    title=queue_title,
+                    priority=queue_priority,
+                    destination=recommendation["sector"],
+                    required_capability=required_capability,
+                    source_recommendation_id=recommendation_id,
+                ),
+                now,
+                f"recommendation-queue-{recommendation_id}",
+            )
+            recommendation["queue_item_id"] = queue["id"]
+        recommendation["status"] = "approved" if response.decision in ("approve", "modify") else "rejected"
+        recommendation["decided_by"] = context.actor_id
+        recommendation["decided_at"] = now.isoformat()
+        recommendation["decision_note"] = response.note
+        recommendation["auto_dispatched"] = False
+        legacy_event = f"recommendation_{'modified_approved' if response.decision == 'modify' else recommendation['status']}"
+        event = f"action_{'modified' if response.decision == 'modify' else response.decision}"
+        audit_fields = {
+            "recommendation_id": recommendation_id,
+            "actor_id": context.actor_id,
+            "at": now.isoformat(),
+            "auto_dispatched": False,
+            "tenant_id": context.tenant_id,
+            "workspace_id": context.workspace_id,
+            "correlation_id": context.correlation_id,
+        }
+        self.audit_events.append({"event": legacy_event, **audit_fields})
+        self.audit_events.append({"event": event, **audit_fields})
         return self._replay_or_record(
             context, idempotency_key, payload, copy.deepcopy(recommendation)
         )
 
-    def audit(self, context: RequestContext) -> list[dict[str, Any]]:
-        return [dict(event) for event in self.audit_events]
+    def record_interaction(
+        self,
+        context: RequestContext,
+        interaction: InteractionAuditRequest,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        payload = {"operation": "command.interaction_audit.v1", **interaction.model_dump()}
+        existing = self._idempotent.get((context.tenant_id, context.workspace_id, idempotency_key))
+        if existing:
+            if existing[0] != _request_hash(payload):
+                raise IdempotencyConflictError
+            result = copy.deepcopy(existing[1])
+            result["replayed"] = True
+            return result
+        record = {
+            "event": interaction.event.replace("_", "."),
+            "subject_type": interaction.subject_type,
+            "subject_id": interaction.subject_id,
+            "actor_id": context.actor_id,
+            "at": now.isoformat(),
+            "tenant_id": context.tenant_id,
+            "workspace_id": context.workspace_id,
+            "correlation_id": context.correlation_id,
+        }
+        self.audit_events.append(record)
+        return self._replay_or_record(
+            context,
+            idempotency_key,
+            payload,
+            {"recorded_at": now.isoformat(), "correlation_id": context.correlation_id, "replayed": False},
+        )
+
+    def audit(
+        self, context: RequestContext, after: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        scoped = [
+            dict(event)
+            for event in self.audit_events
+            if event.get("tenant_id") == context.tenant_id
+            and event.get("workspace_id") == context.workspace_id
+            and (not after or event.get("at", "") > after)
+        ]
+        normalized = []
+        for event in scoped[: max(1, min(limit, 100))]:
+            if isinstance(event.get("event"), str):
+                event["event"] = event["event"].replace(".", "_")
+            normalized.append(event)
+        return normalized
+
+    def list_pending_recommendations(self, context: RequestContext) -> list[dict[str, Any]]:
+        return [
+            copy.deepcopy(item)
+            for item in self.recommendations.values()
+            if item.get("tenant_id") == context.tenant_id
+            and item.get("workspace_id") == context.workspace_id
+            and item.get("status") == "pending_approval"
+        ]
+
+    def get_current_recommendation(self, context: RequestContext) -> dict[str, Any] | None:
+        scoped = [
+            item
+            for item in self.recommendations.values()
+            if item.get("tenant_id") == context.tenant_id
+            and item.get("workspace_id") == context.workspace_id
+        ]
+        return copy.deepcopy(max(scoped, key=lambda item: (item.get("created_at", ""), item.get("id", "")), default=None))
 
 
 class PostgreSQLDecisionStore:
@@ -407,6 +519,13 @@ class PostgreSQLDecisionStore:
         self, context: RequestContext, now: datetime, idempotency_key: str
     ) -> dict[str, Any]:
         payload = {"operation": "decision.replay.v1"}
+        # Check the scoped idempotency record before touching operational state.
+        # This keeps a sequential retry a true replay rather than a second reset/seed.
+        with self._connection() as connection, connection.cursor() as cursor:
+            PostgreSQLOperationsStore._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return existing
         self.operations_store.reset_for_replay(context, now)
         self.operations_store.seed_demo(context, now, f"replay-seed-{_opaque_id('key')}")
         scenario = {
@@ -603,24 +722,26 @@ class PostgreSQLDecisionStore:
                 raise DecisionNotFoundError
             if row[11] and row[11] <= now:
                 raise DecisionNotFoundError
-            status = "approved" if response.decision == "approve" else "rejected"
+            status = "approved" if response.decision in ("approve", "modify") else "rejected"
             cursor.execute(
                 "UPDATE recommendations SET status = %s, decided_by = %s, decided_at = %s, decision_note = %s WHERE id = %s",
                 (status, context.actor_id, now, response.note, recommendation_id),
             )
             queue_id = None
-            if response.decision == "approve":
+            chosen = None
+            if response.decision in ("approve", "modify"):
                 resources = row[3] or []
                 candidates = row[13] or []
-                if response.selected_action and response.selected_action.startswith("restore_"):
+                selected_action = response.selected_action or (candidates[0]["action"] if candidates else row[1])
+                if selected_action.startswith("restore_"):
                     selected = next(
-                        (item for item in candidates if item["action"] == response.selected_action),
+                        (item for item in candidates if item["action"] == selected_action),
                         None,
                     )
                     if selected is None:
                         raise DecisionNotFoundError
                     required_capability = "infrastructure_restoration"
-                    title = selected["action"]
+                    title = selected_action
                 else:
                     chosen = response.resource_id or (resources[0]["id"] if resources else None)
                     if chosen is None or chosen not in {r["id"] for r in resources}:
@@ -629,7 +750,7 @@ class PostgreSQLDecisionStore:
                     title = row[1]
                 queue_id = str(uuid4())
                 cursor.execute(
-                    "INSERT INTO response_queue_items (id, organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, status, created_at) VALUES (%s,%s,%s,%s,'critical',%s,%s,'response',%s,'queued',%s)",
+                    "INSERT INTO response_queue_items (id, organization_id, workspace_id, title, priority, destination, notes, queue_type, required_capability, source_recommendation_id, status, created_at) VALUES (%s,%s,%s,%s,'critical',%s,%s,'response',%s,%s,'queued',%s)",
                     (
                         queue_id,
                         context.tenant_id,
@@ -638,6 +759,7 @@ class PostgreSQLDecisionStore:
                         row[2],
                         f"from recommendation {recommendation_id}",
                         required_capability,
+                        recommendation_id,
                         now,
                     ),
                 )
@@ -674,6 +796,8 @@ class PostgreSQLDecisionStore:
                 "expected_effect": row[10],
                 "expires_at": row[11].isoformat() if row[11] else None,
                 "queue_item_id": queue_id,
+                "selected_action": selected_action if response.decision in ("approve", "modify") else None,
+                "selected_resource_id": chosen,
                 "auto_dispatched": False,
                 "created_at": row[12].isoformat(),
                 "decided_by": context.actor_id,
@@ -689,14 +813,55 @@ class PostgreSQLDecisionStore:
                 {"auto_dispatched": False},
                 now,
             )
+            self._audit(
+                cursor,
+                context,
+                f"action.{'modified' if response.decision == 'modify' else response.decision}",
+                "recommendation",
+                recommendation_id,
+                {"auto_dispatched": False},
+                now,
+            )
             self._record_idempotency(cursor, context, idempotency_key, payload, result, now)
             return result
 
-    def audit(self, context: RequestContext) -> list[dict[str, Any]]:
+    def record_interaction(
+        self,
+        context: RequestContext,
+        interaction: InteractionAuditRequest,
+        now: datetime,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        payload = {"operation": "command.interaction_audit.v1", **interaction.model_dump()}
+        with self._connection() as connection, connection.cursor() as cursor:
+            PostgreSQLOperationsStore._ensure_context(cursor, context, now)
+            existing = self._idempotent(cursor, context, idempotency_key, payload)
+            if existing is not None:
+                return {**existing, "replayed": True}
+            self._audit(
+                cursor,
+                context,
+                interaction.event.replace("_", "."),
+                interaction.subject_type,
+                interaction.subject_id,
+                {},
+                now,
+            )
+            result = {
+                "recorded_at": now.isoformat(),
+                "correlation_id": context.correlation_id,
+                "replayed": False,
+            }
+            self._record_idempotency(cursor, context, idempotency_key, payload, result, now)
+            return result
+
+    def audit(
+        self, context: RequestContext, after: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
         with self._connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT action, subject_id, actor_id, occurred_at, details FROM audit_events WHERE organization_id = %s AND workspace_id = %s AND (action LIKE 'scenario.%%' OR action LIKE 'recommendation.%%') ORDER BY recorded_at, id",
-                (context.tenant_id, context.workspace_id),
+                "SELECT action, subject_id, actor_id, occurred_at, details FROM audit_events WHERE organization_id = %s AND workspace_id = %s AND (action LIKE 'scenario.%%' OR action LIKE 'recommendation.%%' OR action LIKE 'action.%%' OR action LIKE 'evidence.%%') AND (%s IS NULL OR occurred_at > %s) ORDER BY recorded_at, id LIMIT %s",
+                (context.tenant_id, context.workspace_id, after, after, max(1, min(limit, 100))),
             )
             return [
                 {
@@ -708,3 +873,57 @@ class PostgreSQLDecisionStore:
                 }
                 for row in cursor.fetchall()
             ]
+
+    def list_pending_recommendations(self, context: RequestContext) -> list[dict[str, Any]]:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, status, action, sector, reasons, rule, priority, expires_at, created_at, auto_dispatched FROM recommendations WHERE organization_id = %s AND workspace_id = %s AND status = 'pending_approval' ORDER BY priority DESC, created_at, id LIMIT 50",
+                (context.tenant_id, context.workspace_id),
+            )
+            return [
+                {
+                    "id": row[0],
+                    "status": row[1],
+                    "action": row[2],
+                    "sector": row[3],
+                    "reasons": row[4] or [],
+                    "rule": row[5],
+                    "priority": row[6],
+                    "expires_at": row[7].isoformat() if row[7] else None,
+                    "created_at": row[8].isoformat(),
+                    "auto_dispatched": row[9],
+                }
+                for row in cursor.fetchall()
+            ]
+
+    def get_current_recommendation(self, context: RequestContext) -> dict[str, Any] | None:
+        with self._connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, status, action, sector, compatible_resources, reasons, rule, priority, evidence_refs, input_snapshot, input_hash, expected_effect, expires_at, candidates, auto_dispatched, created_at, queue_item_id, decided_by, decided_at, decision_note FROM recommendations WHERE organization_id = %s AND workspace_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                (context.tenant_id, context.workspace_id),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return {
+                "id": row[0],
+                "status": row[1],
+                "action": row[2],
+                "sector": row[3],
+                "compatible_resources": row[4] or [],
+                "reasons": row[5] or [],
+                "rule": row[6],
+                "priority": row[7],
+                "evidence_refs": row[8] or [],
+                "input_snapshot": row[9] or {},
+                "input_hash": row[10],
+                "expected_effect": row[11],
+                "expires_at": row[12].isoformat() if row[12] else None,
+                "candidates": row[13] or [],
+                "auto_dispatched": row[14],
+                "created_at": row[15].isoformat(),
+                "queue_item_id": str(row[16]) if row[16] else None,
+                "decided_by": row[17],
+                "decided_at": row[18].isoformat() if row[18] else None,
+                "decision_note": row[19],
+            }

@@ -11,4 +11,4 @@ COPY migrations ./migrations
 
 RUN python -m pip install --no-cache-dir .
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+CMD ["sh", "-c", "python -m app.persistence && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

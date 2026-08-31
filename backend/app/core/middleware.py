@@ -1,7 +1,6 @@
 """Request safety middleware."""
 # ruff: noqa: E501
 
-import json
 import logging
 import re
 import time
@@ -79,18 +78,21 @@ class RequestGuardMiddleware:
         headers = dict(scope.get("headers", []))
         size = int(headers.get(b"content-length", b"0") or 0)
         if size > self.max_body_bytes:
-            body = json.dumps(
-                {
-                    "code": "REQUEST_TOO_LARGE",
-                    "detail": "Request body exceeds the development limit.",
-                }
-            ).encode()
+            problem = Problem(
+                type="https://ev2.local/problems/request-too-large",
+                title="Request body too large",
+                status=413,
+                code="REQUEST_TOO_LARGE",
+                detail="Request body exceeds the development limit.",
+                correlation_id=scope.get("state", {}).get("correlation_id", "unavailable"),
+            )
+            body = problem.model_dump_json().encode()
             await send(
                 {
                     "type": "http.response.start",
                     "status": 413,
                     "headers": [
-                        (b"content-type", b"application/json"),
+                        (b"content-type", b"application/problem+json"),
                         (b"content-length", str(len(body)).encode()),
                     ],
                 }
@@ -111,14 +113,54 @@ class RequestGuardMiddleware:
         telemetry = getattr(getattr(app, "state", None), "telemetry", None)
         if telemetry is not None:
             telemetry.request("http", status, started)
+            if scope.get("method") not in {"GET", "HEAD", "OPTIONS"} and status >= 400:
+                telemetry.increment("failed_writes")
+            if status == 409 and b"idempotency-key" in headers:
+                telemetry.increment("duplicate_retries")
+        correlation_id = scope.get("state", {}).get("correlation_id", "unavailable")
         self.logger.info(
             "request_complete",
             extra={
+                "event": "request_complete",
                 "method": scope.get("method"),
+                "path": scope.get("path"),
                 "status": status,
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                "correlation_id": correlation_id,
             },
         )
+
+
+class SecurityHeadersMiddleware:
+    """Add conservative browser security headers without changing API payloads."""
+
+    def __init__(self, app: ASGIApp, production: bool = False) -> None:
+        self.app, self.production = app, production
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                existing = {key.lower() for key, _value in message.get("headers", [])}
+                security_headers = [
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"x-frame-options", b"DENY"),
+                    (b"referrer-policy", b"no-referrer"),
+                    (b"permissions-policy", b"camera=(), geolocation=(), microphone=()"),
+                ]
+                if self.production:
+                    security_headers.append(
+                        (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+                    )
+                message["headers"] = list(message.get("headers", [])) + [
+                    item for item in security_headers if item[0] not in existing
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 class IdentityRateLimitMiddleware:
@@ -133,12 +175,21 @@ class IdentityRateLimitMiddleware:
             await self.app(scope, receive, send)
             return
         headers = dict(scope.get("headers", []))
-        identity = headers.get(b"x-dev-identity", b"bearer" ).decode("ascii", errors="ignore") or "anonymous"
+        identity = headers.get(b"x-dev-identity", b"bearer").decode("ascii", errors="ignore") or "anonymous"
         bucket = int(time.time() // self.window_seconds)
         key = (identity, bucket)
         self._counters[key] = self._counters.get(key, 0) + 1
         if self._counters[key] > self.limit:
-            body = json.dumps({"code": "RATE_LIMITED", "detail": "Request limit exceeded; retry shortly."}).encode()
+            problem = Problem(
+                type="https://ev2.local/problems/rate-limited",
+                title="Request rate limited",
+                status=429,
+                code="RATE_LIMITED",
+                detail="Request limit exceeded; retry shortly.",
+                correlation_id=scope.get("state", {}).get("correlation_id", "unavailable"),
+                retryable=True,
+            )
+            body = problem.model_dump_json().encode()
             await send({"type": "http.response.start", "status": 429, "headers": [(b"content-type", b"application/problem+json"), (b"content-length", str(len(body)).encode())]})
             await send({"type": "http.response.body", "body": body})
             return

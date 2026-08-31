@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "dev_eui": "0004A30B001C1234",
+      "device_id": "sensor-north-water-01",
+      "sensor_type": "water_quality",
+      "shelter": "North Relief Camp",
+      "gateway_id": "gateway-north-01",
+      "fport_profile": "dragino_lht65"
+    }
+  ],
+  "gateways": [
+    {
+      "gateway_id": "gateway-north-01",
+      "shelter": "North Relief Camp",
+      "chirpstack_gateway_id": "0016C001FF000001"
+    }
+  ]
+}

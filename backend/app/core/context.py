@@ -85,9 +85,21 @@ def require_scopes(*required_scopes: str):
         settings = request.app.state.settings
         bearer = request.headers.get("authorization", "")
         if bearer.startswith("Bearer "):
+            verifier = (
+                getattr(request.app.state, "identity_verifier", None)
+                if settings.app_environment == "production"
+                else LocalOIDCVerifier()
+            )
+            if verifier is None:
+                raise ApiProblem(
+                    status=401,
+                    code="AUTHENTICATION_REQUIRED",
+                    title="Authentication required",
+                    detail="The production identity adapter is unavailable.",
+                )
             try:
-                fixture = LocalOIDCVerifier().verify(bearer[7:])
-            except ValueError:
+                fixture = verifier.verify(bearer[7:])
+            except (ValueError, TypeError, KeyError):
                 raise ApiProblem(status=401, code="AUTHENTICATION_REQUIRED", title="Authentication required", detail="The identity token is invalid or expired.") from None
         elif settings.app_environment == "production" or not settings.dev_identity_enabled:
             raise ApiProblem(
@@ -105,7 +117,20 @@ def require_scopes(*required_scopes: str):
                 title="Authentication required",
                 detail="Select a known non-production identity fixture.",
             )
-        missing_scopes = set(required_scopes) - fixture["scopes"]
+        try:
+            actor_id = str(fixture["actor_id"])
+            role = str(fixture["role"])
+            tenant_id = str(fixture["tenant_id"])
+            workspace_id = str(fixture["workspace_id"])
+            scopes = frozenset(str(scope) for scope in fixture["scopes"])
+        except (KeyError, TypeError, ValueError):
+            raise ApiProblem(
+                status=401,
+                code="AUTHENTICATION_REQUIRED",
+                title="Authentication required",
+                detail="The identity claims are incomplete.",
+            ) from None
+        missing_scopes = set(required_scopes) - scopes
         if missing_scopes:
             raise ApiProblem(
                 status=403,
@@ -114,11 +139,11 @@ def require_scopes(*required_scopes: str):
                 detail="The current identity is not authorized for this operation.",
             )
         return RequestContext(
-            actor_id=fixture["actor_id"],
-            role=fixture["role"],
-            tenant_id=fixture["tenant_id"],
-            workspace_id=fixture["workspace_id"],
-            scopes=fixture["scopes"],
+            actor_id=actor_id,
+            role=role,
+            tenant_id=tenant_id,
+            workspace_id=workspace_id,
+            scopes=scopes,
             correlation_id=request.state.correlation_id,
         )
 

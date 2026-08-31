@@ -121,3 +121,4 @@ artifacts/*.pptx
 agents.md
 project-issue-fix-prompts.md
 how --stat HEAD
+.vercel

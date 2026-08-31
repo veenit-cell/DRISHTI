@@ -3,80 +3,108 @@ import type { MapFeature } from "../api";
 export const syntheticGeography: MapFeature[] = [
   {
     id: "syn_feat_1",
-    geometry: { type: "Point", coordinates: [91.750, 26.190] }, // Longitude, Latitude (Guwahati/Brahmaputra)
+    geometry: { type: "Point", coordinates: [91.750, 26.190] },
     properties: {
-      title: "Water Purification Unit",
+      title: "Synthetic Rescue Boat 1",
       feature_kind: "Resource",
-      status: "assigned",
+      status: "ready",
+      resource_feasibility: "feasible",
       verification_state: "confirmed",
       synthetic: true,
+      synthetic_dataset: "Synthetic Tabletop Data",
       timestamp: new Date().toISOString(),
-      source: "Command Fixture"
-    }
+      source: "Command Fleet Registry",
+      need: "High",
+      confidence: "High",
+      feasibility: "Feasible",
+    },
   },
   {
     id: "syn_feat_2",
     geometry: { type: "Point", coordinates: [91.730, 26.180] },
     properties: {
-      title: "North Sector Medical Need",
+      title: "North Sector Water Contamination (Severe)",
       feature_kind: "Need",
-      status: "unmet",
+      status: "critical",
       verification_state: "confirmed",
       synthetic: true,
+      synthetic_dataset: "Synthetic Tabletop Data",
       timestamp: new Date().toISOString(),
-      source: "Field Report 8A"
-    }
+      source: "Field Sensor & Drone Telemetry (rpt_demo_01)",
+      need: "Critical",
+      confidence: "High",
+      feasibility: "Feasible",
+    },
   },
   {
     id: "syn_feat_3",
     geometry: { type: "Point", coordinates: [91.740, 26.175] },
     properties: {
-      title: "Evacuation Request",
+      title: "Relief Camp Influx (+180 vs +60)",
       feature_kind: "Need",
-      status: "unmet",
-      verification_state: "probable",
+      status: "contradictory",
+      verification_state: "contradictory",
       synthetic: true,
+      synthetic_dataset: "Synthetic Tabletop Data",
       timestamp: new Date().toISOString(),
-      source: "Drone Analytics"
-    }
+      source: "Conflicting Citizen & Drone Counts (rpt_demo_02)",
+      need: "Medium",
+      confidence: "Medium",
+      feasibility: "Constrained",
+    },
   },
   {
     id: "syn_feat_4",
     geometry: { type: "Point", coordinates: [91.765, 26.185] },
     properties: {
-      title: "NH-27 Corridor Blocked",
+      title: "NH-27 Highway Bridge Washed Out",
       feature_kind: "Route",
       status: "blocked",
+      route_feasibility: "blocked",
       verification_state: "confirmed",
       synthetic: true,
+      synthetic_dataset: "Synthetic Tabletop Data",
       timestamp: new Date().toISOString(),
-      source: "Satellite Uplink"
-    }
+      source: "Satellite Uplink & PWD Alert",
+      need: "Critical",
+      confidence: "High",
+      feasibility: "Infeasible",
+    },
   },
   {
     id: "syn_feat_5",
-    geometry: { type: "Point", coordinates: [91.720, 26.195] },
+    geometry: { type: "Point", coordinates: [91.710, 26.195] },
     properties: {
-      title: "West Bank Sector",
+      title: "Dharapur Village (Zero Reports)",
       feature_kind: "Sector",
       status: "silent",
-      verification_state: "no-information",
+      information_gap: true,
+      verification_state: "needs-verification",
       synthetic: true,
+      synthetic_dataset: "Synthetic Tabletop Data",
       timestamp: new Date().toISOString(),
-      source: "System"
-    }
+      source: "Automated Watchdog (0 reports in 6 hrs / Pop: 4,200)",
+      need: "High",
+      confidence: "Low",
+      feasibility: "Unknown",
+    },
   },
   {
     id: "syn_feat_6",
     geometry: { type: "Point", coordinates: [91.780, 26.170] },
     properties: {
-      title: "South East District",
-      feature_kind: "Area",
-      status: "communications-dark",
-      verification_state: "unassessed",
+      title: "Heavy Excavator Unit 4 (Grounded)",
+      feature_kind: "Resource",
+      status: "not_ready",
+      resource_feasibility: "infeasible",
+      verification_state: "confirmed",
       synthetic: true,
+      synthetic_dataset: "Synthetic Tabletop Data",
       timestamp: new Date().toISOString(),
-      source: "Network Monitor"
-    }
-  }
+      source: "Depot Maintenance Log",
+      need: "Medium",
+      confidence: "High",
+      feasibility: "Infeasible",
+    },
+  },
 ];

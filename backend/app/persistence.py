@@ -12,7 +12,10 @@ def database_ready(database_url: str) -> bool:
         with psycopg.connect(database_url, connect_timeout=1) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT 1")
-                return cursor.fetchone() == (1,)
+                if cursor.fetchone() != (1,):
+                    return False
+                cursor.execute("SELECT PostGIS_Version()")
+                return bool(cursor.fetchone())
     except psycopg.Error:
         return False
 

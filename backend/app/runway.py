@@ -14,6 +14,7 @@ UNITS = {
     "population": "people",
     "population_influx_per_hour": "people/hour",
     "potable_water_liters": "liters",
+    "water_contamination_percent": "percent",
     "water_consumption_liters_per_hour": "liters/hour",
     "replenishment_liters_per_hour": "liters/hour",
     "battery_percent": "percent",
@@ -59,6 +60,9 @@ class RunwaySnapshot(BaseModel):
         for field, value in self.thresholds.items():
             if value is not None and self.units.get(field) != THRESHOLD_UNITS[field]:
                 raise ValueError(f"invalid or missing unit for threshold {field}")
+        contamination = self.values.get("water_contamination_percent")
+        if contamination is not None and not 0 <= contamination <= 100:
+            raise ValueError("water contamination must be between 0 and 100 percent")
         for field, state in self.field_freshness.items():
             if field not in UNITS or state not in {"fresh", "stale", "unknown"}:
                 raise ValueError("invalid field freshness")
@@ -186,6 +190,14 @@ def project_runway(request: RunwayRequest) -> RunwayProjection:
     water_rate = values.get("water_consumption_liters_per_hour")
     water_replenishment = values.get("replenishment_liters_per_hour")
     effective_water_rate = None if water_rate is None or water_replenishment is None or water_rate < 0 or water_replenishment < 0 else water_rate * population_factor - water_replenishment
+    contamination = values.get("water_contamination_percent")
+    usable_water = None if values.get("potable_water_liters") is None or contamination is None else values["potable_water_liters"] * (1 - contamination / 100)
+    water_quantity = values.get("potable_water_liters") if "water_contamination_percent" not in values else usable_water
+    water_contributors = [population_note, "water treatment capacity is not counted as replenishment without a confirmed transfer"]
+    water_required_fields = ["potable_water_liters", "water_consumption_liters_per_hour", "replenishment_liters_per_hour"]
+    if "water_contamination_percent" in values:
+        water_required_fields.append("water_contamination_percent")
+        water_contributors.append("water contamination reduces usable potable reserve")
     battery_percent = values.get("battery_percent")
     battery_capacity = values.get("battery_capacity_kwh")
     power_rate = values.get("power_consumption_kw")
@@ -194,7 +206,7 @@ def project_runway(request: RunwayRequest) -> RunwayProjection:
     battery_quantity = None if battery_percent is None or battery_capacity is None else battery_percent
     battery_threshold = snapshot.thresholds.get("battery_percent")
     projections = [
-        _projection(snapshot, "potable_water", "potable_water_liters", "potable_water_liters", effective_water_rate, "liters", ["potable_water_liters", "water_consumption_liters_per_hour", "replenishment_liters_per_hour"], request.horizon_hours, [population_note, "water treatment capacity is not counted as replenishment without a confirmed transfer"]),
+        _projection(snapshot, "potable_water", "potable_water_liters", "potable_water_liters", effective_water_rate, "liters", water_required_fields, request.horizon_hours, water_contributors) if water_quantity == values.get("potable_water_liters") else _projection(snapshot.model_copy(update={"values": {**values, "potable_water_liters": water_quantity}}), "potable_water", "potable_water_liters", "potable_water_liters", effective_water_rate, "liters", water_required_fields, request.horizon_hours, water_contributors),
         _projection(snapshot, "battery", "battery_percent", "battery_percent", None if battery_quantity is None or battery_threshold is None or battery_capacity is None else (effective_battery_rate * 100 / battery_capacity if effective_battery_rate is not None else None), "percent", ["battery_percent", "battery_capacity_kwh", "power_consumption_kw", "battery_replenishment_kw"], request.horizon_hours, ["battery percent converted using explicit battery capacity", population_note]),
         _projection(snapshot, "medicine", "medicine_units", "medicine_units", None if values.get("medicine_consumption_per_hour") is None or values["medicine_consumption_per_hour"] < 0 else values["medicine_consumption_per_hour"] * population_factor, "units", ["medicine_units", "medicine_consumption_per_hour"], request.horizon_hours, [population_note]),
         _projection(snapshot, "cold_chain", "cold_chain_hours", "cold_chain_hours", None if values.get("cold_chain_depletion_hours_per_hour") is not None and values["cold_chain_depletion_hours_per_hour"] < 0 else values.get("cold_chain_depletion_hours_per_hour"), "hours", ["cold_chain_hours", "cold_chain_depletion_hours_per_hour"], request.horizon_hours, ["reserve is operational time, not a clinical guarantee"]),
