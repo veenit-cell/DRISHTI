@@ -17,7 +17,12 @@ def test_postgres_pilot_configuration_and_feed_boundary_round_trip() -> None:
     now = datetime(2026, 8, 30, 12, tzinfo=UTC)
     suffix = uuid4().hex
     context = RequestContext(
-        "operator", "operator", f"org_pg_pilot_{suffix}", f"evt_pg_pilot_{suffix}", frozenset(), "test"
+        "operator",
+        "operator",
+        f"org_pg_pilot_{suffix}",
+        f"evt_pg_pilot_{suffix}",
+        frozenset(),
+        "test",
     )
     store = PostgreSQLPilotStore(Settings().database_url)
     configured = store.configure(
