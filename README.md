@@ -1,4 +1,4 @@
-# RescueOps
+# DRISHTI
 
 > **Human-supervised disaster operations for the first 24 hours.**
 
@@ -11,7 +11,7 @@ Activate incident → assign sectors → receive evidence → verify → create 
 
 It is not an autonomous dispatcher, public-alert originator, or generic heat-map dashboard.
 
-## Why RescueOps
+## Why DRISHTI
 
 During a disaster, report volume is not need. A connected urban area can overwhelm a queue while an isolated settlement goes silent. A nearby resource may be unsuitable, committed, or unable to cross a newly blocked corridor.
 
