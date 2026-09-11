@@ -105,6 +105,8 @@ build/
 
 # Documentation is source material; only implementation handoffs are committed here.
 docs/*
+!docs/assets/
+!docs/assets/*
 !docs/handoffs/
 docs/handoffs/*
 !docs/handoffs/phase-1/

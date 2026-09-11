@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+  <title id="title">DRISHTI operational decision loop</title>
+  <desc id="desc">Evidence is reviewed, risk is projected, a response is recommended, a commander approves it, and the mission outcome returns to the evidence loop.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#07111f"/>
+      <stop offset="1" stop-color="#102a43"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" x2="1">
+      <stop offset="0" stop-color="#42d6c5"/>
+      <stop offset="1" stop-color="#66a6ff"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    <style>
+      .card { fill: #10243a; stroke: #31516d; stroke-width: 2; }
+      .label { fill: #f4f8fb; font: 700 18px system-ui, sans-serif; text-anchor: middle; }
+      .sub { fill: #9fb6c9; font: 13px system-ui, sans-serif; text-anchor: middle; }
+      .flow { fill: none; stroke: url(#accent); stroke-width: 4; stroke-linecap: round; stroke-dasharray: 12 12; animation: flow 2.4s linear infinite; }
+      .node { fill: #42d6c5; filter: url(#glow); animation: node 2.4s ease-in-out infinite; }
+      .node:nth-of-type(2) { animation-delay: .4s; }
+      .node:nth-of-type(3) { animation-delay: .8s; }
+      .node:nth-of-type(4) { animation-delay: 1.2s; }
+      .node:nth-of-type(5) { animation-delay: 1.6s; }
+      @keyframes flow { to { stroke-dashoffset: -48; } }
+      @keyframes node { 0%, 100% { r: 5; opacity: .55; } 50% { r: 10; opacity: 1; } }
+      @media (prefers-reduced-motion: reduce) { .flow, .node { animation: none; } }
+    </style>
+  </defs>
+  <rect width="1200" height="360" rx="24" fill="url(#bg)"/>
+  <text x="60" y="58" fill="#42d6c5" font-family="system-ui, sans-serif" font-size="13" font-weight="700" letter-spacing="2">DRISHTI / OPERATIONAL INTELLIGENCE</text>
+  <text x="60" y="92" fill="#ffffff" font-family="system-ui, sans-serif" font-size="28" font-weight="700">From uncertain evidence to accountable action</text>
+  <path class="flow" d="M170 205 H1030"/>
+  <circle class="node" cx="170" cy="205" r="6"/><circle class="node" cx="385" cy="205" r="6"/><circle class="node" cx="600" cy="205" r="6"/><circle class="node" cx="815" cy="205" r="6"/><circle class="node" cx="1030" cy="205" r="6"/>
+  <g transform="translate(78 145)"><rect class="card" width="184" height="122" rx="14"/><text class="label" x="92" y="43">Evidence</text><text class="sub" x="92" y="70">Reports, sources,</text><text class="sub" x="92" y="90">unknowns, conflicts</text></g>
+  <g transform="translate(293 145)"><rect class="card" width="184" height="122" rx="14"/><text class="label" x="92" y="43">Understand</text><text class="sub" x="92" y="70">Coverage, routes,</text><text class="sub" x="92" y="90">resource readiness</text></g>
+  <g transform="translate(508 145)"><rect class="card" width="184" height="122" rx="14"/><text class="label" x="92" y="43">Project</text><text class="sub" x="92" y="70">Risk, runway,</text><text class="sub" x="92" y="90">cascading failure</text></g>
+  <g transform="translate(723 145)"><rect class="card" width="184" height="122" rx="14"/><text class="label" x="92" y="43">Recommend</text><text class="sub" x="92" y="70">Feasible options</text><text class="sub" x="92" y="90">with explanations</text></g>
+  <g transform="translate(938 145)"><rect class="card" width="184" height="122" rx="14"/><text class="label" x="92" y="43">Authorize</text><text class="sub" x="92" y="70">Human approval,</text><text class="sub" x="92" y="90">mission, outcome</text></g>
+  <text x="600" y="316" fill="#9fb6c9" font-family="system-ui, sans-serif" font-size="14" text-anchor="middle">Every decision keeps its evidence, assumptions, uncertainty, and outcome.</text>
+</svg>
