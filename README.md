@@ -1,133 +1,192 @@
-# DRISHTI
+<div align="center">
 
-> **Human-supervised disaster operations for the first 24 hours.**
+# PROJECT DRISHTI
 
-DRISHTI is an operational decision-support platform for emergency commanders. It turns incomplete, conflicting, and sometimes stale field information into accountable response actions—while keeping uncertainty visible and human approval in control.
-
-It is designed around a simple question:
-
-> **What needs attention next, what can we do about it, and what evidence supports that decision?**
-
-DRISHTI is a tabletop-ready hackathon MVP. It is not a production dispatch system, a public-alert service, or an autonomous command platform.
+### *Human-Supervised Disaster Intelligence, Response & Incident Command Platform*
 
 <p align="center">
-  <img src="docs/assets/drishti-operational-loop.svg" alt="Animated DRISHTI operational loop: evidence, understand, project, recommend, authorize" width="100%" />
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=21&pause=900&color=EF5B2A&center=true&vCenter=true&width=760&height=48&lines=Evidence-aware+disaster+operations;Human-in-the-loop+mission+control;Coverage+gaps%2C+routes%2C+resources+%26+auditability;Offline-capable+tabletop+command+workspace" alt="DRISHTI capabilities" />
 </p>
 
-<p align="center"><em>The animated loop illustrates the product thesis: uncertainty becomes a supervised, explainable operational decision.</em></p>
+[![Verification](https://img.shields.io/github/actions/workflow/status/veenit-cell/DRISHTI/verification.yml?branch=main&style=for-the-badge&label=Verification)](https://github.com/veenit-cell/DRISHTI/actions/workflows/verification.yml)
+[![Python](https://img.shields.io/badge/Python-3.12--3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=111)](https://react.dev/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.116-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostGIS](https://img.shields.io/badge/PostgreSQL%20%2B%20PostGIS-17%20%2F%203.5-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://postgis.net/)
+[![Status](https://img.shields.io/badge/Status-Tabletop--Ready-F59E0B?style=for-the-badge)](#current-status)
 
-## The problem
+**From uncertain field reports to accountable, commander-approved action.**
 
-In a disaster, the loudest area is not always the area with the greatest need. A report can be duplicated, contradictory, outdated, or impossible to reach. A nearby vehicle may be committed, not ready, or missing the capability required for the task. A location with no reports may be silent—not safe.
+[Overview](#executive-summary) · [Capabilities](#core-capabilities) · [Architecture](#system-architecture) · [Run locally](#run-locally) · [Validation](#engineering-and-validation) · [Safety](#safety-boundary)
 
-DRISHTI treats response as a chain of decisions rather than a collection of map pins:
+</div>
+
+---
+
+## Executive summary
+
+**DRISHTI**—also presented in the product as **RescueOps**—is an operations workspace for the first hours of a disaster. It helps a response team turn incomplete, stale, contradictory, or geographically uneven evidence into missions that remain reviewable by a human commander.
+
+The platform combines a React command workspace with a FastAPI decision-support backend, deterministic policy logic, offline command reconciliation, and PostgreSQL/PostGIS persistence. Every recommendation retains its evidence, exclusions, assumptions, policy version, and approval history.
 
 ```text
-Activate incident
-  → assign sectors
-  → collect and review evidence
-  → expose coverage gaps and unknowns
-  → compare feasible response options
-  → request commander approval
-  → deploy and track a mission
-  → record outcome and handover context
+Activate incident → assign sectors → ingest reports → review evidence
+→ expose coverage gaps → create mission → check route and capability
+→ commander approval → field updates → outcome → shift handover
 ```
+
+> [!IMPORTANT]
+> DRISHTI is a supervised **tabletop/demo system**. It is not an autonomous dispatcher, public-alert authority, or certified production system for live emergency operations.
+
+## The operational problem
+
+Disaster response is not simply a queue sorted by report count. Connected areas can dominate attention while isolated settlements go silent. A nearby team may lack the required capability, already be committed, or be unable to cross a blocked corridor. A plausible report may also be stale, duplicated, or contradicted.
+
+| Conventional failure mode | DRISHTI response |
+|---|---|
+| No reports are interpreted as no need | Unassessed and communications-dark areas remain visible as **coverage debt** |
+| Every report appears equally trustworthy | Source, age, confidence, conflicts, and review state travel with the evidence |
+| Nearest resource is treated as best resource | Readiness, capability, commitment, and route feasibility are checked first |
+| Recommendations become opaque instructions | Reasons, exclusions, assumptions, expiry, and policy versions are preserved |
+| Connectivity loss hides work or creates false certainty | Commands remain explicitly queued until reconciliation succeeds |
+| Shift change loses decision context | SITREP, outcome, audit, and handover records retain the operational trail |
+
+## Core capabilities
+
+### 1. Common operating picture
+
+- Incident activation, pause, resume, closure, and sector assignment
+- Map-oriented operational workspace with bounded spatial features
+- Shelter state, route conditions, infrastructure dependencies, and resource readiness
+- Update health states for connected, reconnecting, stale, and offline operation
+
+### 2. Evidence trust and verification
+
+- Immutable original reports with normalization provenance
+- Claim-level states: corroborated, contradicted, unknown, stale, or pending review
+- Duplicate and contradiction visibility
+- Verification queues that prioritize information value, including silent areas
+
+### 3. Capability-aware mission control
+
+- Mission creation from reviewed evidence
+- Resource matching by capability, readiness, availability, and route constraints
+- Explicit commander approve, reject, modify, pause, and override actions
+- Task lifecycle from assignment through acknowledgement, arrival, completion, and outcome
+
+### 4. Decision support—not decision replacement
+
+- Deterministic recommendation ranking and feasibility checks
+- Infrastructure dependency graph and cascade analysis
+- Multi-horizon runway projections and what-if scenarios
+- Plans, selective invalidation, decision certificates, and mutual-aid drafts
+
+### 5. Degraded-mode operations
+
+- Browser-local outbox for reports and task commands
+- Per-command pending, conflict, rejected, and reconciled states
+- Printable mission packets and last-known-state timestamps
+- Synthetic tabletop replay for connectivity loss, blocked routes, duplicates, and silent locations
+
+### 6. Accountability and resilience
+
+- Tenant/workspace scopes and role-based authorization boundaries
+- Idempotency keys, correlation IDs, bounded request bodies, rate limits, and problem+json errors
+- Append-oriented audit events, recommendation provenance, and outcome records
+- Production startup fails closed without external identity and telemetry adapters
+
+## Operator workspace
+
+The React interface is organized around seven operational views:
+
+| View | Purpose |
+|---|---|
+| **Command** | Incident overview, priorities, decisions, and operational brief |
+| **Map** | Spatial awareness, coverage gaps, routes, shelters, and field state |
+| **Reports** | Evidence intake, claim review, contradictions, and verification |
+| **Missions** | Approval queue, assignment, lifecycle, and outcomes |
+| **Resources** | Teams, vehicles, equipment, readiness, and capability |
+| **Logistics** | Forecasts, infrastructure dependencies, and mutual aid |
+| **Handover** | SITREP export, audit context, replay, and tabletop exercises |
+
+## System architecture
 
 ```mermaid
 flowchart LR
-  E[Field evidence] --> V[Verify and classify]
-  V --> S[Shelter / incident state]
-  S --> P[Project risk and runway]
-  P --> W[What-if comparison]
-  W --> R[Explainable recommendation]
-  R --> H{Human approval}
-  H -->|Approve / modify| M[Mission and response queue]
-  H -->|Reject| A[Audit and reassessment]
-  M --> O[Outcome and handover]
-  O --> E
+    subgraph Clients[Operator surfaces]
+      UI[React 19 command workspace]
+      OFF[Offline outbox & reconciliation]
+      MAP[Leaflet common operating picture]
+    end
+
+    subgraph API[FastAPI /api/v1]
+      CMD[Incident command]
+      EVD[Evidence & coverage]
+      OPS[Missions, routes & resources]
+      DSS[Decision, cascade & what-if]
+      AID[Forecasting & mutual aid]
+      AUD[Audit, updates & exports]
+    end
+
+    subgraph Data[Storage and integrations]
+      MEM[Deterministic in-memory stores]
+      PG[(PostgreSQL + PostGIS)]
+      IOT[LoRaWAN / ChirpStack adapter]
+      EXT[OIDC, telemetry & agency adapters]
+    end
+
+    UI --> API
+    OFF --> API
+    MAP --> EVD
+    CMD & EVD & OPS & DSS & AID & AUD --> MEM
+    CMD & EVD & OPS & DSS & AID & AUD --> PG
+    IOT --> AUD
+    EXT --> API
 ```
 
-<details>
-<summary>How to read the loop</summary>
-
-`Evidence` is never silently converted into certainty. DRISHTI carries freshness, contradiction, reporting impairment, route feasibility, and resource constraints into the projected state. Recommendations remain proposals until a commander makes the operational decision; outcomes then feed the next assessment.
-
-</details>
-
-## What makes DRISHTI different
-
-- **Silence is not safety.** Reporting gaps and communications-dark areas remain visible as operational uncertainty.
-- **Evidence precedes action.** Source, age, confidence, contradictions, privacy class, and review state travel with the report and decision.
-- **Capability beats proximity.** Candidate resources are checked for readiness, capability, task conflicts, and route feasibility.
-- **Recommendations are explainable.** Each recommendation exposes its reasons, evidence references, unknowns, assumptions, cost, expected effect, and confidence.
-- **Authority is explicit.** High-risk actions are proposed by the system but approved, modified, rejected, paused, and completed by people.
-- **Degradation is honest.** Offline work is shown as locally queued and awaiting reconciliation; synthetic data is labelled instead of presented as live truth.
-- **Outcomes close the loop.** A mission is not complete until its operational outcome and handover context are recorded.
-
-## The operator experience
-
-The React workspace is organized around the questions an incident commander must answer:
-
-1. **What is happening?** Review reports, claims, map features, route conditions, resource readiness, and coverage debt.
-2. **What is uncertain?** See stale, contradicted, unverified, and communications-dark locations instead of hiding them behind one score.
-3. **What should happen next?** Generate a deterministic recommendation from the current operational state.
-4. **Can it actually happen?** Compare resource capability, readiness, route status, conflicts, and infrastructure dependencies.
-5. **Who authorized it?** Approve, modify, or reject the proposed action; no high-risk action is auto-dispatched.
-6. **What happened?** Progress the mission, capture a structured outcome, and produce a SITREP or handover record.
-
-The built-in tabletop replay demonstrates a synthetic scenario containing water-risk attention, a contradictory population signal, a silent settlement, a blocked corridor, constrained resources, and reconnection after an outage.
-
-## Current capabilities
-
-| Capability | What it provides |
-| --- | --- |
-| Incident command | Incidents, roles, sectors, activation, and scoped command context |
-| Evidence workbench | Immutable report originals, normalized claims, review states, duplicates, contradictions, and incident links |
-| Coverage intelligence | Coverage cells, reporting impairment, coverage debt, and verification ranking |
-| Operational map | Bounded GeoJSON features for incidents, resources, routes, and information gaps |
-| Resource feasibility | Readiness, capabilities, route observations, task conflicts, and response queues |
-| Decision loop | Scenario replay, cascade evaluation, decision policy, ranked candidates, approval, rejection, and audit |
-| Plans and dependencies | Assumptions, selective invalidation, infrastructure dependency graphs, and mission-unlock ranking |
-| Mutual aid | Resource forecasts, reserve-floor checks, and approval workflow for resource requests |
-| Offline operations | Local outbox, queued commands, reconciliation records, connectivity status, and printable task packets |
-| Handover and evaluation | SITREP/CSV export, audit integrity views, deterministic evaluation replay, and synthetic tabletop exercise |
-| Pilot boundaries | Workspace mode, feed configuration boundary, retention preview, and LoRaWAN/MQTT ingestion hooks |
-
-## Architecture
+### Decision path
 
 ```mermaid
-flowchart LR
-  UI[React operator workspace] --> API[FastAPI /api/v1]
-  API --> CMD[Incident command]
-  API --> EVD[Evidence and coverage]
-  API --> OPS[Resources, routes, missions]
-  API --> DEC[Decision loop and plans]
-  API --> AID[Mutual aid and pilot controls]
-  CMD & EVD & OPS & DEC & AID --> STORE{Store adapter}
-  STORE --> MEM[Deterministic in-memory store]
-  STORE --> PG[(PostgreSQL / PostGIS)]
+sequenceDiagram
+    participant F as Field / operator
+    participant E as Evidence service
+    participant D as Decision engine
+    participant C as Commander
+    participant O as Operations
+
+    F->>E: Submit scoped report
+    E->>E: Normalize, classify and detect conflicts
+    E->>D: Reviewed evidence + unknowns
+    D->>D: Check capability, route and dependencies
+    D-->>C: Ranked recommendation + exclusions
+    C->>O: Approve, modify or reject
+    O-->>F: Assigned mission / reconciliation state
+    F->>O: Progress and structured outcome
+    O->>D: Audit trail and updated snapshot
 ```
 
-### Ownership boundaries
+## Technology stack
 
-- **Frontend:** React 19, TypeScript, Vite, Leaflet/React-Leaflet; owns presentation, interaction, map rendering, scenario controls, and offline UI.
-- **Backend:** Python 3.12–3.13, FastAPI, Pydantic, Uvicorn; owns authorization context, validation, idempotency, operational state, decision policy, audit orchestration, and API delivery.
-- **Persistence:** PostgreSQL + PostGIS migrations for durable state, with deterministic in-memory adapters for development and tests.
-- **Reliability boundary:** correlation IDs, problem+json errors, request guards, rate limits, idempotency keys, audit records, and an offline outbox.
+| Layer | Technologies |
+|---|---|
+| Frontend | React 19, TypeScript 5.9, Vite 7, Leaflet / React-Leaflet |
+| Backend | Python 3.12–3.13, FastAPI, Pydantic Settings, Uvicorn |
+| Data | PostgreSQL 17, PostGIS 3.5, psycopg; in-memory development adapters |
+| Field integration | LoRaWAN / ChirpStack MQTT boundary, modular telemetry adapters |
+| Testing | pytest, Ruff, Vitest, Testing Library, Playwright, axe-core, k6 |
+| Delivery | Docker Compose, GitHub Actions, Vercel/Railway configuration |
 
-The backend is intentionally a modular monolith. The project does not require Kafka, Kubernetes, microservices, or autonomous control to demonstrate its core value.
-
-## Quick start
+## Run locally
 
 ### Prerequisites
 
 - Python 3.12 or 3.13
-- Node.js 22 or newer and npm
-- Docker Desktop with Compose, only if you want PostgreSQL/PostGIS mode
+- Node.js 22+ and npm
+- Docker Desktop with Compose *(optional, for PostgreSQL/PostGIS mode)*
 
-### Install
+### 1. Install dependencies
 
-From the repository root:
+Linux/macOS:
 
 ```bash
 python3 -m venv .venv
@@ -135,39 +194,36 @@ python3 -m venv .venv
 npm --prefix frontend ci
 ```
 
-On Windows PowerShell:
+Windows PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup-backend.ps1
-npm.cmd --prefix .\frontend ci
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".\backend[dev]"
+npm.cmd --prefix frontend ci
 ```
 
-### Run development/tabletop mode
+See the [Windows setup guide](README-WINDOWS.md) for the scripted workflow.
 
-This mode works without a database. The backend selects deterministic in-memory stores when PostgreSQL is unavailable; state resets when the backend restarts.
-
-Terminal 1:
+### 2. Start the API
 
 ```bash
 cd backend
 ../.venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Terminal 2:
+On Windows, use `..\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000`.
+
+When PostgreSQL is unavailable, development mode uses deterministic in-memory stores. This data resets when the API restarts.
+
+### 3. Start the operator workspace
 
 ```bash
 npm --prefix frontend run dev
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The API documentation is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+Open `http://127.0.0.1:5173`. Interactive API documentation is available at `http://127.0.0.1:8000/docs` outside production.
 
-On Windows, the convenience launcher starts the database, applies migrations, and launches both applications:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\dev.ps1
-```
-
-### Run PostgreSQL/PostGIS mode
+### PostgreSQL/PostGIS mode
 
 ```bash
 docker compose -f infra/compose.yaml up -d --wait
@@ -176,140 +232,158 @@ cd backend
 ../.venv/bin/uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The local database defaults to `postgresql://postgres@127.0.0.1:5432/ev2`. Migrations are forward-only and currently run through `0024_recommendation_queue_provenance.sql`.
+The development database URL defaults to `postgresql://postgres@127.0.0.1:5432/ev2`. Migrations are forward-only through `0024_recommendation_queue_provenance.sql`.
 
-### Local identity
-
-Development mode uses the fixture identity `operator`:
+### Development identity
 
 ```bash
-curl -H 'X-Dev-Identity: operator' http://127.0.0.1:8000/api/v1/dev/context
+curl -H "X-Dev-Identity: operator" http://127.0.0.1:8000/api/v1/dev/context
 ```
 
-This header is disabled in production and is not a substitute for OIDC/OAuth authentication.
+This identity is a local fixture only. Production mode disables it and requires an injected OIDC verifier.
 
-## Try the demo
+## API surface
 
-For the clearest end-to-end walkthrough:
+All application endpoints live under `/api/v1`.
 
-1. Open the operator workspace and confirm the synthetic-data banner.
-2. Activate an incident and assign sectors.
-3. Seed or replay the synthetic evidence scenario.
-4. Review corroborated, contradicted, stale, and unknown claims.
-5. Inspect the map for the silent settlement and blocked corridor.
-6. Generate the decision-loop recommendation.
-7. Open the recommendation details to inspect evidence, unknowns, assumptions, feasibility, and expected effect.
-8. Approve, modify, or reject the action as commander.
-9. Progress the resulting mission and record its structured outcome.
-10. Run the tabletop exercise or export a SITREP for handover.
+| Domain | Representative endpoints |
+|---|---|
+| System | `/health/live`, `/health/ready`, `/version`, `/metrics` |
+| Incident command | `/command/incidents`, `/command/incidents/{id}/sectors` |
+| Evidence | `/reports`, `/reports/{id}/review`, `/map/features` |
+| Coverage | `/coverage/cells`, `/coverage/verification-ranking` |
+| Operations | `/missions`, `/resources`, `/route-observations`, `/tasks` |
+| Decisions | `/decision-loop/recommendations`, `/plans`, `/decision-certificates` |
+| Mutual aid | `/resource-forecasts`, `/resource-requests/{id}/approve` |
+| Resilience | `/offline-sync`, `/exports/sitrep`, `/pilot/exercises/tabletop` |
+| Field telemetry | `/telemetry/summary`, LoRaWAN ingestion and webhook routes |
 
-The scenario is synthetic. Its numbers and outcomes are fixture outputs for demonstration and evaluation, not field-performance claims.
+Client integrators should first read the [roles and scopes](contracts/v1/roles-and-scopes.md), [contract glossary](contracts/v1/glossary.md), and versioned JSON schemas in [`contracts/v1`](contracts/v1).
 
-## Verification
+## Engineering and validation
 
-Backend checks:
+The repository currently contains:
+
+- **99** FastAPI route declarations
+- **23** forward-only SQL migrations
+- **180** backend test functions
+- **65** backend/frontend test and spec files
+- CI jobs for frontend, backend, security, PostGIS integration, browser accessibility, deployment smoke, and opt-in load testing
+
+### Local checks
 
 ```bash
+# Backend
 cd backend
 ../.venv/bin/ruff format --check app tests
 ../.venv/bin/ruff check app tests
 ../.venv/bin/python -m pytest -q
-```
 
-Frontend checks:
-
-```bash
-cd frontend
+# Frontend
+cd ../frontend
 npm run typecheck
 npm run build
 npm test
 ```
 
-Optional browser and accessibility checks:
+### Verification boundaries
 
-```bash
-npx playwright install chromium
-npm run test:e2e
-npm run test:a11y
-```
+| Environment | What it verifies | What it does not prove |
+|---|---|---|
+| In-memory backend | Deterministic domain behavior and API contracts | Database migrations or deployed isolation |
+| Compose integration | PostGIS migrations, adapters, and scope assertions | A production identity or agency integration |
+| Browser fixtures | Operator workflow and accessibility states | Live feeds, real authentication, or field outcomes |
+| Synthetic tabletop | Failure-path behavior and replay determinism | Real-world response performance |
+| k6 opt-in job | A specifically authorized test deployment | Safety or suitability for production use |
 
-PostgreSQL integration checks require Docker Desktop:
+The latest repository audit classifies the system as **demo/tabletop-ready and blocked from production release**. See the [production-readiness report](docs/PRODUCTION_READINESS_FINAL.md) and [verification matrix](docs/VERIFICATION_MATRIX.md) for the evidence behind that decision.
 
-```bash
-docker compose -f infra/compose.integration.yaml up --build --abort-on-container-exit --exit-code-from backend-tests
-```
+## Demonstration flow
 
-The repository separates in-memory, synthetic browser, and real-integration evidence. A skipped database test is not treated as proof of database correctness.
+1. Activate an incident and divide the operational area into sectors.
+2. Submit a report and inspect its source, age, confidence, and claim states.
+3. Corroborate or contradict claims and expose areas that remain unassessed.
+4. Create a mission from reviewed evidence.
+5. Compare resources by capability, readiness, commitment, and route feasibility.
+6. Approve the recommendation as a commander and advance the task lifecycle.
+7. Record a structured outcome, generate a SITREP, and inspect the audit chain.
+8. Run the labelled synthetic tabletop to demonstrate degraded connectivity and recovery.
 
-## API surface
-
-All endpoints are under `/api/v1`. Use the generated OpenAPI document at `/docs` for request and response details.
-
-| Domain | Representative endpoints |
-| --- | --- |
-| Command | `/command/summary`, `/command/incidents`, `/command/incidents/{id}/sectors` |
-| Evidence | `/reports`, `/reports/{id}/review`, `/reports/{id}/incident-links` |
-| Coverage and map | `/coverage/cells`, `/coverage/verification-ranking`, `/map/features` |
-| Operations | `/resources`, `/response-queue`, `/tasks`, `/route-observations` |
-| Decisions | `/decision-loop/demo/replay`, `/decision-loop/recommendations`, `/decision-loop/recommendations/{id}/decision` |
-| Scenarios | `/shelter-state/demo/seed`, `/runway/projections`, `/cascade/evaluate`, `/what-if/evaluate` |
-| Plans and aid | `/plans`, `/decision-certificates`, `/infrastructure/unlock-ranking`, `/resource-forecasts` |
-| Resilience | `/offline-sync`, `/updates`, `/audit/integrity`, `/exports/sitrep` |
-| Pilot and feeds | `/pilot/status`, `/pilot/exercises/tabletop`, `/feeds/sync`, `/lorawan/webhook` |
-
-Integrators should read [roles and scopes](contracts/v1/roles-and-scopes.md), the [glossary](contracts/v1/glossary.md), and the JSON schemas in [contracts/v1](contracts/v1). Report creation requires an idempotency key matching `client_record_id`.
-
-## Repository map
+## Repository structure
 
 ```text
-backend/
-  app/                    FastAPI application and domain modules
-  migrations/             PostgreSQL/PostGIS forward-only migrations
-  tests/                  Unit, contract, workflow, and integration tests
-frontend/
-  src/features/operator/  React operator workspace and offline experience
-  tests/                  Vitest, Playwright E2E, and accessibility tests
-contracts/v1/             Versioned API/event/report schemas and examples
-infra/                    Local and integration Compose definitions
-scripts/                  Windows setup, development, smoke, security, and replay helpers
-docs/                     Architecture notes, release notes, and handoff manifests
-load/                     Scoped k6 command-flow load test
+DRISHTI/
+├── backend/
+│   ├── app/                 # FastAPI domains, policies, adapters and stores
+│   ├── migrations/          # PostgreSQL/PostGIS forward migrations
+│   └── tests/               # Unit, contract, security and integration tests
+├── frontend/
+│   ├── src/features/operator/ # Command workspace and offline workflows
+│   └── tests/               # Playwright E2E and accessibility scenarios
+├── contracts/v1/            # JSON schemas, examples, roles and glossary
+├── infra/                   # Development and integration Compose files
+├── load/                    # Scoped k6 command-path test
+├── scripts/                 # Setup, validation, smoke and recovery helpers
+├── artifacts/               # Synthetic evaluation replay evidence
+└── docs/                    # Architecture, handoffs and readiness reports
 ```
 
-## Configuration and deployment boundaries
+## Current status
 
-Configuration uses the `EV2_` environment-variable prefix. Common settings include `EV2_APP_ENVIRONMENT`, `EV2_DATABASE_URL`, `EV2_ALLOWED_ORIGINS`, `EV2_DEV_IDENTITY_ENABLED`, and the rate/request limits defined in `backend/app/core/config.py`.
+| Area | Status |
+|---|---|
+| Incident command, sectors, evidence review, duplicates and contradictions | Implemented |
+| Coverage debt and verification ranking | Implemented |
+| Missions, route/capability checks, approval, lifecycle and outcomes | Implemented |
+| Plans, dependencies, what-if analysis, decision certificates and mutual aid | Implemented |
+| Browser-local offline queue and reconciliation records | Implemented; deployed production auth is still required |
+| Synthetic evaluation replay and fault tabletop | Implemented and explicitly labelled synthetic |
+| PostgreSQL/PostGIS schema and adapter harness | Present; requires integration execution evidence |
+| Production OIDC, durable telemetry/update infrastructure and real agency feeds | External integration required |
+| Live emergency deployment certification | Not claimed |
 
-Production requires all of the following:
+## Roadmap
 
-- `EV2_APP_ENVIRONMENT=production`
-- development identity disabled
-- HTTPS, non-loopback allowed origins
-- a secret-manager supplied database URL
-- an external OIDC verifier
-- a production telemetry adapter
-- durable update-feed and metrics infrastructure
+- [ ] Integrate an approved OIDC provider and production offline-authentication flow
+- [ ] Exercise every migration and isolation guarantee against managed PostGIS
+- [ ] Replace in-process update/telemetry state with durable infrastructure
+- [ ] Connect authorized agency feeds and real LoRaWAN gateways through reviewed adapters
+- [ ] Complete authenticated browser, load, recovery, rollback, and alerting exercises
+- [ ] Validate with supervised emergency-management tabletop partners
+- [ ] Add public demo media captured only from synthetic data
 
-The repository includes deployment definitions for Vercel and Railway, but deployment configuration is not evidence of production readiness. The real-integration Compose file is intentionally an example boundary and does not contain provider credentials.
+## Safety boundary
 
-## Safety and scope
+DRISHTI must not:
 
-DRISHTI must not autonomously dispatch high-risk missions, declare a silent location safe, expose precise sensitive locations without authorization, replace medical/structural/aviation authority, or present synthetic information as live data.
+- autonomously dispatch a high-risk mission;
+- interpret silence as evidence that a location is safe;
+- expose precise sensitive locations without need-to-know authorization;
+- replace medical, aviation, structural, incident-command, or public-warning authority; or
+- present synthetic fixtures or projections as live field truth.
 
-Before real operational use, the system would require approved identity and jurisdiction controls, tested PostgreSQL/PostGIS deployment, durable telemetry and updates, server-side offline-command reconciliation with conflict review, privacy/security review, authorized agency feeds, rollback testing, and supervised exercises.
+Before any field use, the deployment must supply approved identity, jurisdiction controls, durable storage and updates, real telemetry adapters, privacy review, operational governance, rollback procedures, and evidence from supervised exercises.
 
-## Further reading
+## Documentation
 
+- [Architecture alignment report](docs/architecture-alignment-final-report.md)
+- [Architecture gap analysis](docs/architecture-implementation-gap-analysis.md)
+- [Production-readiness report](docs/PRODUCTION_READINESS_FINAL.md)
+- [Verification matrix](docs/VERIFICATION_MATRIX.md)
+- [Dependency audit](docs/DEPENDENCY_AUDIT.md)
+- [Reliability and recovery](docs/reliability-recovery.md)
 - [Release notes](docs/RELEASE_NOTES.md)
-- [Architecture alignment status](docs/architecture-alignment-status.md)
-- [Architecture implementation gap analysis](docs/architecture-implementation-gap-analysis.md)
-- [Reliability and recovery notes](docs/reliability-recovery.md)
-- [Operator golden flow](docs/handoffs/operator-workspace/golden-flow.md)
-- [Decision-loop handoff](docs/handoffs/decision-policy/manifest.md)
-- [What-if handoff](docs/handoffs/what-if/manifest.md)
-- [Offline-sync handoff](docs/handoffs/offline-sync/manifest.md)
-- [Versioned contracts](contracts/v1)
 
 ## License
 
-No license file is currently present. All rights are reserved unless the maintainers add a license.
+No license file is currently included. Until one is added, the repository remains under the copyright holder's default rights.
+
+---
+
+<div align="center">
+
+Built for accountable disaster operations—where uncertainty stays visible and humans retain authority.
+
+[Report an issue](https://github.com/veenit-cell/DRISHTI/issues) · [View verification](https://github.com/veenit-cell/DRISHTI/actions/workflows/verification.yml)
+
+</div>
